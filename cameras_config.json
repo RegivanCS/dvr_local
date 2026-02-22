@@ -13,17 +13,7 @@
     {
       "id": "cam2",
       "name": "Câmera Frente",
-      "ip": "192.168.1.101",
-      "port": 554,
-      "user": "uwfa",
-      "password": "Herb1745@",
-      "path": "/stream",
-      "enabled": true
-    },
-    {
-      "id": "cam3",
-      "name": "Câmera Externa",
-      "ip": "192.168.0.101",
+      "ip": "192.168.1.10",
       "port": 554,
       "user": "uwfa",
       "password": "Herb1745@",

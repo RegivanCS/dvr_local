@@ -91,16 +91,20 @@ class RTSPStream:
         self.is_running = False
         self.thread = None
         self.frame_count = 0
+        self.last_frame_time = 0
+        self.reconnect_attempts = 0
     
     def connect(self):
         logger.info(f"{self.cam_id}: Conectando {self.rtsp_url}")
         try:
             cap = cv2.VideoCapture(self.rtsp_url)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_TIMEOUT, 5000)  # 5 segundos timeout
             ret, frame = cap.read()
             if ret and frame is not None:
                 logger.info(f"{self.cam_id}: ✓ Conectado!")
                 self.cap = cap
+                self.reconnect_attempts = 0
                 return True
             cap.release()
         except Exception as e:
@@ -118,22 +122,45 @@ class RTSPStream:
         return True
     
     def _capture_loop(self):
+        consecutive_failures = 0
         while self.is_running:
             try:
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
                     self.last_frame = frame
                     self.frame_count += 1
+                    self.last_frame_time = time.time()
+                    consecutive_failures = 0
                 else:
-                    logger.error(f"{self.cam_id}: Erro ao ler frame")
-                    break
+                    consecutive_failures += 1
+                    logger.warning(f"{self.cam_id}: Falha ao ler frame ({consecutive_failures})")
+                    
+                    if consecutive_failures >= 10:
+                        logger.error(f"{self.cam_id}: Muitas falhas, tentando reconectar...")
+                        if self.cap:
+                            self.cap.release()
+                        time.sleep(2)
+                        if self.connect():
+                            consecutive_failures = 0
+                            logger.info(f"{self.cam_id}: Reconectado com sucesso!")
+                        else:
+                            self.reconnect_attempts += 1
+                            if self.reconnect_attempts >= 5:
+                                logger.error(f"{self.cam_id}: Reconexão falhou 5 vezes, parando stream")
+                                break
+                
                 time.sleep(0.033)
             except Exception as e:
-                logger.error(f"{self.cam_id}: {e}")
-                break
+                logger.error(f"{self.cam_id}: Exceção: {e}")
+                consecutive_failures += 1
+                if consecutive_failures >= 10:
+                    break
+                time.sleep(1)
+        
         self.is_running = False
         if self.cap:
             self.cap.release()
+        logger.info(f"{self.cam_id}: Stream finalizado")
     
     def get_frame(self):
         return self.last_frame
@@ -194,10 +221,13 @@ def api_status():
     status = {}
     for cam_id, cam in cams.items():
         stream = camera_streams.get(cam_id)
+        is_connected = stream is not None and stream.is_running
         status[cam_id] = {
             'name': cam['name'],
-            'connected': stream is not None and stream.is_running,
-            'frames': stream.frame_count if stream else 0
+            'connected': is_connected,
+            'frames': stream.frame_count if stream else 0,
+            'last_frame_age': time.time() - stream.last_frame_time if (stream and stream.last_frame_time > 0) else None,
+            'reconnect_attempts': stream.reconnect_attempts if stream else 0
         }
     return jsonify(status)
 
