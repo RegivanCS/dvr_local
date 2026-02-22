@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta http-equiv="Pragma" content="no-cache"/>
+    <meta http-equiv="Cache-Control" content="no-cache,no-store, must-revalidate"/>
+    <meta http-equiv="Expires" content="0"/>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+    <meta name="ROBOTS" content="NOINDEX, NOFOLLOW"/>
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <title>Web Viewer</title>
+    <link href="css/main.css" rel="stylesheet" type="text/css"/>
+	<script type="text/javascript" src="js/jquery-3.5.0.min.js"></script>
+    <script type="text/javascript">
+		function doNothing(e){
+			window.event.returnValue=false;
+			return false;
+		}
+		var curDate = new Date;
+		$.getScript("pluginVersion.js?version="+curDate.getTime()).done(function(){
+			$.getScript("js/main.js?version=" + version_web).fail(function(jqxhr, settings, exception){
+				alert(exception + " : main.js");
+			});
+		}).fail(function(jqxhr, settings, exception){
+				alert(exception + " : pluginVersion.js");
+		});
+    </script>
+</head>
+<body oncontextmenu="doNothing()">
+<iframe id="MsgPaop_box" title="Paop" frameborder="0" scrolling="no" style="display:none;"></iframe>
+<iframe id="MaskLayout"></iframe>
+<div id="runDiv" href="VideoPlayTool://1" style="display:none"></div>
+<div class="header">
+	<!--Menu Section-->
+	<div class="headerMenu">
+		<div class="logoImg"></div>
+		<div class="menuBg" id="menuForNormal">
+			<div class="other">
+				<div class="otherBox" id="logoutMenu">
+					<div class="otherBtn" id="logoutBtn">Logout</div>
+					<div id="Logout" class="otherLogo"></div>
+				</div>
+			</div>
+			<div class="Menu">
+				<div class="menuBox" id="LiveMenu">
+					<div id="liveBtn" class="menuBtn" data-name="">Preview</div>
+				</div>
+				<div class="menuBox" id="PlayBackMenu">
+					<div id="playbackBtn" class="menuBtn" data-name="">Playback</div>
+				</div>
+				<div class="menuBox" id="AlarmM

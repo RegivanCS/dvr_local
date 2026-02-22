@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta http-equiv="Pragma" content="no-cache"/>
+    <meta http-equiv="Cache-Control" content="no-cache,no-store, must-revalidate"/>
+    <meta http-equiv="Expires" content="0"/>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+    <meta name="ROBOTS" content="NOINDEX, NOFOLLOW"/>
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <title>Web Viewer</title>
+    <link href="css/main.css" rel="stylesheet" type="text/css"/>
+	<script type="text/javascript" src="js/jquery-3.5.0.min.js"></script>
+    <script type="text/javascript">
+		function doNothing(e){
+			window.event.returnValue=false;
+			return false;
+		}
+		var curDate = new Date;
+		$.getScript("pluginVersion.js?version="+curDate.getTime()).done(function(){
+			$.getScript("js/main.js?version=" + version_web).fail(function(jqxhr, settings, exception){
+				alert(exception + " : main.js");
+			});
+		}).fail(function(jqxhr, settings, exception){
+				alert(exception + " : pluginVersion.js");
+		});
+    </script>
+</head>
+<body oncontextmenu="doNothing()">
+<iframe id="MsgPaop_box" title="Paop" frameborder="0" scrolling="no" style="display:none;"></iframe>
+<iframe id="MaskLayout"></iframe>
+<div id="runDiv" href="VideoPlayTool://1" style="display:none"></div>
+<div class="header">
+	<!--Menu Section-->
+	<div class="headerMenu">
+		<div class="logoImg"></div>
+		<div class="menuBg" id="menuForNormal">
+			<div class="other">
+				<div class="otherBox" id="logoutMenu">
+					<div class="otherBtn" id="logoutBtn">Logout</div>
+					<div id="Logout" class="otherLogo"></div>
+				</div>
+			</div>
+			<div class="Menu">
+				<div class="menuBox" id="LiveMenu">
+					<div id="liveBtn" class="menuBtn" data-name="">Preview</div>
+				</div>
+				<div class="menuBox" id="PlayBackMenu">
+					<div id="playbackBtn" class="menuBtn" data-name="">Playback</div>
+				</div>
+				<div class="menuBox" id="AlarmMenu">
+					<div id="alarmBtn" class="menuBtn" data-name="">Alarm</div>
+				</div>
+				<div class="menuBox" id="ConfigMenu">
+					<div id="configBtn" class="menuBtn" data-name="">Remote Setting</div>
+				</div>
+				<div class="menuBox" id="ClientMenu" style="display:none;">
+					<div id="clientBtn" class="menuBtn" data-name="">Local Setting</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div id="menuMask"></div>
+</div>
+<div id="container" class="container">
+	<div id="login" style="display: none;"></div>
+	<div id="webplugins" style="display: block;height:100%;width:100%">
+		<div id="OcxTip" style="display:none">
+			<div style="background-color: #797D84;display:none;border-radius: 6px;" id="ErrTipRow">
+				<span id="ErrorTip" style="height:40px;color:#fff;line-height: 40px;text-align: center;"></span>
+			</div>
+			<div>
+				<div id="GoogleTip" style="display: none;width:450px;margin-left: 20px;">
+					<div><span id="SetupTip1"></span></div>
+					<div><span id="SetupTip2"></span></div>
+					<div><span>&apos;chrome://flags/#block-insecure-private-network-requests&apos;</span></div>
+					<div><span id="SetupTip3"></span></div>
+					<div><span id="SetupTip4"></span></div>
+				</div>
+			</div>
+			<div style="margin-top:5px;display:none;" id="OcxTipRow"><div id="LossOcxTip"></div></div>
+		</div>
+	</div>
+	<div class="main" id="main" style="position:relative;">
+		<div class="mcontainer">
+			<div class="Page" id="live" data-name="notLoad"></div>
+			<div class="Page" id="playback" data-name="notLoad"></div>
+			<div class="Page" id="alarm" data-name="notLoad"></div>
+			<div class="Page" id="config" data-name="notLoad"></div>
+			<div class="Page" id="client" data-name="notLoad"></div>
+			<div class="mcmcmain" id="IndexObj" style="display: block; height:0px;"></div>
+		</div>
+	</div>
+	<div id="mfoot" class="mfoot" style="display:none;height:40px;">
+		<div id="wndModeBar" data-name="" style="display:none">
+			<div class="WndModeBtn" id="SplitMode_0" name="" data-val="0"></div>
+			<div class="WndModeBtn" id="SplitMode_1" name="" data-val="1"></div>
+			<div class="WndModeBtn" id="SplitMode_2" name="" data-val="2"></div>
+			<div class="WndModeBtn" id="SplitMode_3" name="" data-val="3"></div>
+			<div class="WndModeBtn" id="SplitMode_4" name="" data-val="4"></div>
+			<div class="WndModeBtn" id="SplitMode_5" name="" data-val="5"></div>
+			<div class="WndModeBtn" id="SplitMode_6" name="" data-val="6"></div>
+		</div>
+		<div id="StreamBar" data-name="" style="display:none">
+			<div class="StreamTypeBtn" id="Stream_Main" name="" data-val="0">MainStream</div>
+			<div class="StreamTypeBtn" id="Stream_Extra" name="" data-val="1">SubStream</div>
+			<div class="StreamTypeBtn" id="Stream_Stop" name="" data-val="2">FullChannel Stop</div>
+		</div>
+	</div>
+</div>
+<div class="popupBox" id="login_user_prompt" style="display:none;">
+    <ul>
+        <li class="popupBoxTitle" id="login_user_title"><em></em></li>
+    </ul>
+    <ul class="popupBoxContent" id="login_user_content">
+        <li>
+            <label id="login_userName_label"></label> : <input class="inputTxt" id='login_userName_input' type="text" readonly="readonly"/>
+        </li>
+        <li>
+            <div style="float: left;display: inline-block"><label id="login_user_label"></label> :</div>
+            <input class="inputTxt PswEyeShow" id='login_user_input' type="password" style="margin-top: 6px;margin-left: 4px"/>
+            <div class="psw_eye_arc" style="margin-top: 15px">
+                <div class="psw_eye_cicle"></div>
+            </div>
+        </li>
+        <li id="strengthBar">
+            <div class="strengthBar_div">
+                <div class="progress-bar_wrap" style="background-color: #bbb">
+					<span class="progress-bar_item progress-bar_item-0"></span>
+                    <span class="progress-bar_item progress-bar_item-1"></span>
+                    <span class="progress-bar_item progress-bar_item-2"></span>
+                    <span class="progress-bar_item progress-bar_item-3"></span>
+                </div>
+                <span class="progress-bar_text">Low</span>
+            </div>
+        </li>
+        <li>
+            <div style="float: left;display: inline-block"><label id="login_user_confirm_label"></label> :</div>
+            <input class="inputTxt PswEyeShow" id='login_user_input_confirm' type="password" style="margin-top: 6px;margin-left: 4px"/>
+            <div class="psw_eye_arc" style="margin-top: 15px">
+                <div class="psw_eye_cicle"></div>
+            </div>
+        </li>
+        <li class="btn_box">
+            <input type="button" class="btn" id="login_btn_user_ok" value='OK'/>
+        </li>
+    </ul>
+</div>
+<div class="SecondaryContent" id="SecondaryContent" style="display: none">
+    <ul class="SecondTitle">
+        <li><h3 id="content_title"></h3><span class="second_close">&times;</span></li>
+    </ul>
+    <ul class="content_details">
+        <li class="content_container"></li>
+    </ul>
+</div>
+<!-- Period Dialog-->
+<div class="dialog_role" id="period_dialog" style="width:700px; left:20%;display:none;">
+	<ul class="SecondTitle">
+		<li><h3 id="period_Title">Period</h3><span class="second_close2">&times;</span></li>
+	</ul>
+	<ul class="content_details">
+		<li class="content_container">
+		</li>
+	</ul>
+</div>
+
+<!-- PTZ Dialog-->
+<div class="dialog_role" id="PtzLink_dialog" style="width:750px; left:20%;display:none;">
+	<ul class="SecondTitle">
+		<li><h3 id="PTZ_Title">PTZ Activation</h3><span class="second_close2">&times;</span></li>
+	</ul>
+	<ul class="content_details">
+		<li class="content_container">
+			<div class="setup-ptz-form" id="ptzChnBox">
+			</div>
+
+			<div class="btn_box" style="padding-left:225px;">
+				<button type="button" class="btn" id="nextbtn" style="display:none;">Next</button>
+				<button type="button" class="btn" id="PTZ_Ok">OK</button>
+				<button type="button" class="btn" id="PTZ_cancle">Cancel</button>
+			</div>
+		</li>
+	</ul>
+</div>
+<!-- Config Dialog-->
+<div class="dialog_role" id="Config_dialog" style="width:750px; left:20%; display:none;">
+	<ul class="SecondTitle">
+		<li><h3 id="Config_Title">Config Title</h3><span class="second_close">&times;</span></li>
+	</ul>
+	<ul class="content_details">
+		<li class="content_container">
+			
+		</li>
+	</ul>
+</div>
+<!--Audio Dialog-->
+<div class="dialog_role" id="Audio_dialog" style="width:750px; left:20%; display:none;">
+	<ul class="SecondTitle">
+		<li><h3 id="Audio_Title">Audio Title</h3><span class="second_close" id="AudioDLgClose">&times;</span></li>
+	</ul>
+	<ul class="content_details">
+		<li class="content_container">
+			<div class="cfg_row">
+				<div class="cfg_row_left"  id="Remainning_Time_Left"></div>
+				<div class="cfg_row_right" id="Remaining_Time_Right">5</div>
+			</div>
+			<div class="btn_box" style="margin:10px 0 0 -14px;">
+				<button class="btn autoWidth" id="StartRecAudioBtn"></button>
+				<button class="btn autoWidth" id="StopRecAudioBtn"></button>
+				<button class="btn autoWidth" id="PlayRecAudioBtn"></button>
+				<button class="btn autoWidth" id="SendAudioBtn"></button>
+			</div>
+		</li>
+	</ul>
+</div>
+<div class="Forget_Content" id="ForgetPwdContent" style="display:none;">
+	<ul class="SecondTitle">
+		<li><h3 id="content_title">Reset</h3><span class="second_close">&times;</span></li>
+	</ul>
+	<ul class="content_details">
+		<li class="content_container"></li>
+	</ul>
+</div>
+</body>
+</html>
