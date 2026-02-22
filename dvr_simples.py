@@ -99,7 +99,6 @@ class RTSPStream:
         try:
             cap = cv2.VideoCapture(self.rtsp_url)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_TIMEOUT, 5000)  # 5 segundos timeout
             ret, frame = cap.read()
             if ret and frame is not None:
                 logger.info(f"{self.cam_id}: ✓ Conectado!")

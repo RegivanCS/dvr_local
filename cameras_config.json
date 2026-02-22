@@ -15,8 +15,8 @@
       "name": "Câmera Frente",
       "ip": "192.168.1.10",
       "port": 554,
-      "user": "uwfa",
-      "password": "Herb1745@",
+      "user": "",
+      "password": "",
       "path": "/stream",
       "enabled": true
     }
