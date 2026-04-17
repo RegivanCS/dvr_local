@@ -6,6 +6,8 @@ Testar todos os paths conhecidos de câmeras IP para encontrar a imagem
 
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import os
 
 # Lista extensa de paths conhecidos para câmeras IP
 PATHS_TO_TEST = [
@@ -106,13 +108,21 @@ def test_path(ip, port, user, password, path):
 
 print("🔍 Testando câmeras para encontrar o path correto da imagem...\n")
 
-cameras = [
-    {'ip': '192.168.1.3', 'port': 80, 'name': 'Câmera 1 (Entrada)'},
-    {'ip': '192.168.1.10', 'port': 80, 'name': 'Câmera 2 (Frente)'},
-]
+# Carrega câmeras da configuração (IPs são definidos pela tela de configurações)
+def _load_cameras():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f).get('cameras', {})
+        return [{'ip': c.get('ip'), 'port': c.get('port', 80), 'name': c.get('name', 'Câmera'),
+                 'user': c.get('user', 'admin'), 'password': c.get('password', '')} for c in raw.values()]
+    except:
+        return []
 
-user = 'admin'
-password = 'Herb1745@'
+cameras = _load_cameras()
+if not cameras:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 for camera in cameras:
     print(f"=" * 70)
@@ -126,7 +136,7 @@ for camera in cameras:
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = []
         for path in PATHS_TO_TEST:
-            futures.append(executor.submit(test_path, camera['ip'], camera['port'], user, password, path))
+            futures.append(executor.submit(test_path, camera['ip'], camera['port'], camera.get('user', 'admin'), camera.get('password', ''), path))
         
         for future in as_completed(futures):
             result = future.result()

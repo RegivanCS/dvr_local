@@ -1,24 +1,3 @@
 {
-  "cameras": [
-    {
-      "id": "cam1",
-      "name": "Câmera Entrada",
-      "ip": "192.168.1.3",
-      "port": 554,
-      "user": "dcmk",
-      "password": "Herb1745@",
-      "path": "/stream",
-      "enabled": true
-    },
-    {
-      "id": "cam2",
-      "name": "Câmera Frente",
-      "ip": "192.168.1.10",
-      "port": 554,
-      "user": "",
-      "password": "",
-      "path": "/stream",
-      "enabled": true
-    }
-  ]
+  "cameras": {}
 }

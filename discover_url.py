@@ -1,6 +1,25 @@
 import subprocess
 import os
 import requests
+import json
+
+# Carrega IP/credenciais da configuração (definidos pela tela de configurações)
+def _load_first_camera():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cameras = json.load(f).get('cameras', {})
+        if cameras:
+            cam = next(iter(cameras.values()))
+            return cam.get('ip', ''), cam.get('port', 80), cam.get('user', 'admin'), cam.get('password', '')
+    except:
+        pass
+    return None, None, None, None
+
+_ip, _port, _user, _password = _load_first_camera()
+if not _ip:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 print("=" * 60)
 print("TESTE: Descobrir URL correta da câmera")
@@ -8,27 +27,25 @@ print("=" * 60)
 
 ffmpeg_path = r"C:\Program Files\Agent\dlls\x64\ffmpeg.exe"
 
-# URLs comuns para câmeras IP
+# URLs geradas a partir das configurações (não use IPs fixos aqui)
 urls_to_test = [
     # HTTP/MJPEG
-    "http://admin:Herb1745@192.168.1.3:8899/video",
-    "http://admin:Herb1745@192.168.1.3:8899/video.cgi",
-    "http://admin:Herb1745@192.168.1.3:8899/mjpg/video.mjpg",
-    "http://192.168.1.3:8899/video",
-    "http://192.168.1.3:8899/",
-    
-    # RTSP com tcp
-    "rtsp://admin:Herb1745@192.168.1.3:8899/stream?transportmode=unicast",
-    "rtsp://admin:Herb1745@192.168.1.3:8899",
-    
-    # Tentar acessar a web
+    f"http://{_user}:{_password}@{_ip}:{_port}/video",
+    f"http://{_user}:{_password}@{_ip}:{_port}/video.cgi",
+    f"http://{_user}:{_password}@{_ip}:{_port}/mjpg/video.mjpg",
+    f"http://{_ip}:{_port}/video",
+    f"http://{_ip}:{_port}/",
+
+    # RTSP
+    f"rtsp://{_user}:{_password}@{_ip}:{_port}/stream?transportmode=unicast",
+    f"rtsp://{_user}:{_password}@{_ip}:{_port}",
 ]
 
 # Primeiro, tentar ver o que a câmera responde em HTTP
 print("\n1. Verificando HTTP básico:")
 print("-" * 60)
 try:
-    response = requests.get("http://192.168.1.3:8899", timeout=2)
+    response = requests.get(f"http://{_ip}:{_port}", timeout=2)
     print(f"Status: {response.status_code}")
     print(f"Headers: {dict(response.headers)}")
     print(f"Content (primeiros 200 chars): {response.text[:200]}")

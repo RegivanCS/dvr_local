@@ -7,16 +7,37 @@ Tentar descobrir como as câmeras servem o vídeo usando análise JavaScript
 import requests
 import re
 import json
+import os
+
+# Carrega IP/credenciais da configuração (definidos pela tela de configurações)
+def _load_camera(index=0):
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cams = list(json.load(f).get('cameras', {}).values())
+        if cams and index < len(cams):
+            c = cams[index]
+            return c.get('ip', ''), c.get('port', 554), c.get('user', 'admin'), c.get('password', '')
+    except:
+        pass
+    return None, None, None, None
+
+_ip, _port, _user, _password = _load_camera(1)  # usa segunda câmera por padrão
+if not _ip:
+    _ip, _port, _user, _password = _load_camera(0)
+if not _ip:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 print("🔍 Analisando como as câmeras servem vídeo...\n")
 
-# Câmera 2 - Porta 8899
+# Câmera configurada via tela de configurações
 print("=" * 70)
-print("🎥 Testando Câmera 2 na porta 8899")
+print(f"🎥 Testando Câmera na porta {_port}")
 print("=" * 70)
 
-base_url = "http://192.168.1.10:8899"
-auth = ('admin', 'Herb1745@')
+base_url = f"http://{_ip}:{_port}"
+auth = (_user, _password)
 
 # Obter os arquivos JavaScript
 print("\n1️⃣ Obtendo informações dos arquivos JavaScript...\n")
@@ -84,10 +105,10 @@ for resource in resources[:10]:
 print("\n3️⃣ Tentando RTSP (alternativa ao HTTP)...\n")
 
 rtsp_urls = [
-    'rtsp://192.168.1.10:554/stream',
-    'rtsp://192.168.1.10:554/stream/ch0',
-    'rtsp://admin:Herb1745@192.168.1.10:554/stream',
-    'rtsp://192.168.1.10:8899/stream',
+    f'rtsp://{_ip}:554/stream',
+    f'rtsp://{_ip}:554/stream/ch0',
+    f'rtsp://{_user}:{_password}@{_ip}:554/stream',
+    f'rtsp://{_ip}:{_port}/stream',
 ]
 
 print("RTSP URLs para tentar manualmente:")

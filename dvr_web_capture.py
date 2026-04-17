@@ -9,28 +9,46 @@ import cv2
 import numpy as np
 import time
 import logging
+import json
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-CAMERAS = {
-    'cam1': {'name': 'Câmera 1', 'ip': '192.168.1.3', 'port': 80},
-    'cam2': {'name': 'Câmera 2', 'ip': '192.168.1.10', 'port': 80},
-}
+# IPs e credenciais são carregados de cameras_config.json (configure pela tela de configurações)
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
 
-AUTH = HTTPBasicAuth('admin', 'Herb1745@')
+# As variáveis abaixo foram removidas do código; use a tela de configurações para definir IPs
+# CAMERAS = {...}  # não use IPs fixos aqui
+# AUTH = HTTPBasicAuth(...)  # não use credenciais fixas aqui
+
+def load_cameras():
+    """Carrega câmeras do arquivo de configuração"""
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f).get('cameras', {})
+    except:
+        return {}
 
 
 def generate_from_web_interface(camera_id):
-    """Captura da interface web da câmera"""
-    cam = CAMERAS.get(camera_id)
+    """Captura da interface web da câmera usando config carregado de cameras_config.json"""
+    cameras = load_cameras()
+    cam = cameras.get(camera_id)
     if not cam:
         return
-    
-    # Tentar acessar interface web e procurar por iframe ou elemento de vídeo
-    base_url = f"http://{cam['ip']}:{cam['port']}"
+
+    ip = cam.get('ip', '')
+    port = cam.get('port', 80)
+    user = cam.get('user', '')
+    password = cam.get('password', '')
+    auth = HTTPBasicAuth(user, password) if user else None
+
+    base_url = f"http://{ip}:{port}"
     
     logger.info(f"{camera_id}: Conectando a {base_url}")
     
@@ -48,7 +66,7 @@ def generate_from_web_interface(camera_id):
     # Encontrar URL que funciona
     for url in snapshot_urls:
         try:
-            r = requests.get(url, auth=AUTH, timeout=2)
+            r = requests.get(url, auth=auth, timeout=2)
             if r.status_code == 200 and len(r.content) > 1000:
                 if r.content[:2] == b'\xff\xd8':  # JPEG header
                     working_url = url
@@ -68,7 +86,7 @@ def generate_from_web_interface(camera_id):
     
     while True:
         try:
-            r = requests.get(working_url, auth=AUTH, timeout=5)
+            r = requests.get(working_url, auth=auth, timeout=5)
             
             if r.status_code == 200 and len(r.content) > 1000:
                 frame_count += 1

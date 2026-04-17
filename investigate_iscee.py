@@ -11,15 +11,27 @@ import cv2
 import time
 from urllib.parse import quote
 import json
+import os
 
-# Configuração das câmeras
-CAMERAS = [
-    {"name": "Entrada", "ip": "192.168.1.3"},
-    {"name": "Frente", "ip": "192.168.1.10"},
-]
+# Carrega câmeras da configuração (IPs são definidos pela tela de configurações)
+def _load_cameras():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f).get('cameras', {})
+        return [{"name": c.get('name', 'Câmera'), "ip": c.get('ip'),
+                 "user": c.get('user', 'admin'), "password": c.get('password', '')} for c in raw.values()]
+    except:
+        return []
 
-USER = "admin"
-PASS = "Herb1745@"
+CAMERAS = _load_cameras()
+if not CAMERAS:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
+
+# USER e PASS são lidos da primeira câmera configurada
+USER = CAMERAS[0].get('user', 'admin')
+PASS = CAMERAS[0].get('password', '')
 PASS_ENCODED = quote(PASS, safe='')
 
 def test_http_basic(ip, port=80):
@@ -346,9 +358,9 @@ if __name__ == "__main__":
     print(f"{'='*60}")
     print("""
 Para câmeras ISCEE, tipicamente:
-1. HTTP JPEG: http://admin:Herb1745@[IP]:80/image.cgi ou /image.jpg
-2. HTTP MJPEG: http://admin:Herb1745@[IP]:80/stream ou /video.cgi
-3. RTSP: rtsp://admin:Herb1745@[IP]:554/stream
+1. HTTP JPEG: http://[user]:[pass]@[IP]:80/image.cgi ou /image.jpg
+2. HTTP MJPEG: http://[user]:[pass]@[IP]:80/stream ou /video.cgi
+3. RTSP: rtsp://[user]:[pass]@[IP]:554/stream
 
 Se retornar 401 em RTSP:
 - Tentar sem autenticação: rtsp://[IP]:554/stream
@@ -357,7 +369,7 @@ Se retornar 401 em RTSP:
 
 Se usar com OpenCV:
 import cv2
-cap = cv2.VideoCapture("http://admin:Herb1745@192.168.1.3:80/stream")
+cap = cv2.VideoCapture("http://[user]:[pass]@[IP]:80/stream")
 ret, frame = cap.read()
 
 Com timeout:

@@ -7,21 +7,35 @@ Investigar como a interface web ISCEE acessa a câmera
 import requests
 import re
 import json
+import os
 
-CAMERAS = [
-    {"name": "Entrada", "ip": "192.168.1.3"},
-    {"name": "Frente", "ip": "192.168.1.10"},
-]
+# Carrega câmeras da configuração (IPs são definidos pela tela de configurações)
+def _load_cameras():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f).get('cameras', {})
+        return [{"name": c.get('name', 'Câmera'), "ip": c.get('ip'),
+                 "user": c.get('user', 'admin'), "password": c.get('password', '')} for c in raw.values()]
+    except:
+        return []
 
-def investigate_web_interface(ip):
+CAMERAS = _load_cameras()
+if not CAMERAS:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
+
+def investigate_web_interface(cam):
     """Investigar a interface web para encontrar endpoints"""
+    ip = cam['ip']
+    auth = (cam.get('user', 'admin'), cam.get('password', ''))
     print(f"\n{'='*60}")
     print(f"ANALISANDO INTERFACE WEB: {ip}")
     print('='*60)
     
     try:
         # Obter página inicial
-        r = requests.get(f"http://{ip}", auth=("admin", "Herb1745@"), timeout=3)
+        r = requests.get(f"http://{ip}", auth=auth, timeout=3)
         html = r.text
         
         # Procurar por padrões de URL/API
@@ -80,8 +94,10 @@ def investigate_web_interface(ip):
     except Exception as e:
         print(f"✗ Erro ao acessar: {e}")
 
-def test_web_api_endpoints(ip):
+def test_web_api_endpoints(cam):
     """Testar endpoints de API que câmeras ISCEE podem ter"""
+    ip = cam['ip']
+    auth = (cam.get('user', 'admin'), cam.get('password', ''))
     print(f"\n{'='*60}")
     print(f"TESTANDO ENDPOINTS DE API: {ip}")
     print('='*60)
@@ -112,7 +128,7 @@ def test_web_api_endpoints(ip):
     for endpoint in endpoints:
         try:
             url = f"http://{ip}{endpoint}"
-            r = requests.get(url, auth=("admin", "Herb1745@"), timeout=2)
+            r = requests.get(url, auth=auth, timeout=2)
             
             if r.status_code != 404:
                 print(f"\n  ✓ {endpoint}")
@@ -128,8 +144,10 @@ def test_web_api_endpoints(ip):
         except:
             pass
 
-def test_javascript_api_calls(ip):
+def test_javascript_api_calls(cam):
     """Baixar JavaScript e procurar por chamadas de API"""
+    ip = cam['ip']
+    auth = (cam.get('user', 'admin'), cam.get('password', ''))
     print(f"\n{'='*60}")
     print(f"ANALISANDO JAVASCRIPT: {ip}")
     print('='*60)
@@ -145,7 +163,7 @@ def test_javascript_api_calls(ip):
     for js_file in js_files:
         try:
             url = f"http://{ip}{js_file}"
-            r = requests.get(url, auth=("admin", "Herb1745@"), timeout=2)
+            r = requests.get(url, auth=auth, timeout=2)
             
             if r.status_code == 200:
                 print(f"\n  ✓ {js_file} - Encontrado")
@@ -203,8 +221,10 @@ def test_rtsp_without_auth(ip):
         except Exception as e:
             print(f"\n  ✗ {url} - {str(e)[:40]}")
 
-def test_http_streaming(ip, port=80):
+def test_http_streaming(cam, port=80):
     """Testar se HTTP streaming funciona com diferentes métodos"""
+    ip = cam['ip']
+    auth = (cam.get('user', 'admin'), cam.get('password', ''))
     print(f"\n{'='*60}")
     print(f"TESTANDO HTTP STREAMING: {ip}:{port}")
     print('='*60)
@@ -214,7 +234,7 @@ def test_http_streaming(ip, port=80):
     try:
         r = requests.get(
             f"http://{ip}:{port}/stream",
-            auth=("admin", "Herb1745@"),
+            auth=auth,
             headers={"Range": "bytes=0-1000"},
             timeout=2
         )
@@ -237,7 +257,7 @@ def test_http_streaming(ip, port=80):
         try:
             r = requests.get(
                 f"http://{ip}:{port}/stream",
-                auth=("admin", "Herb1745@"),
+                auth=auth,
                 headers={"Accept": accept},
                 timeout=2,
                 stream=True
@@ -256,12 +276,12 @@ def test_http_streaming(ip, port=80):
 # Executar
 if __name__ == "__main__":
     for cam in CAMERAS:
-        investigate_web_interface(cam['ip'])
-        test_web_api_endpoints(cam['ip'])
-        test_javascript_api_calls(cam['ip'])
+        investigate_web_interface(cam)
+        test_web_api_endpoints(cam)
+        test_javascript_api_calls(cam)
         test_rtsp_without_auth(cam['ip'])
-        test_http_streaming(cam['ip'], 80)
-        test_http_streaming(cam['ip'], 8899)
+        test_http_streaming(cam, 80)
+        test_http_streaming(cam, 8899)
         
         break  # Apenas primeira câmera para não demorar
     

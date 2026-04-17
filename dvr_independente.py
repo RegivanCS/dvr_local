@@ -47,29 +47,9 @@ def build_rtsp_urls(cam_info):
 
 
 def default_config():
+    # IPs e credenciais devem ser inseridos apenas pela tela de configurações
     return {
-        'cameras': [
-            {
-                'id': 'cam1',
-                'name': 'Câmera 1 (Entrada)',
-                'ip': '192.168.1.3',
-                'port': 554,
-                'user': 'dcmk',
-                'password': 'Herb1745@',
-                'paths': ['/stream', '/ch0', '/'],
-                'enabled': True
-            },
-            {
-                'id': 'cam2',
-                'name': 'Câmera 2 (Frente)',
-                'ip': '192.168.1.10',
-                'port': 554,
-                'user': 'dcmk',
-                'password': 'Herb1745@',
-                'paths': ['/stream', '/ch0', '/'],
-                'enabled': True
-            }
-        ]
+        'cameras': []
     }
 
 

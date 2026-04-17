@@ -2,29 +2,28 @@ from flask import Flask, Response, render_template_string
 import requests
 import logging
 import time
+import json
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Câmeras ISCEE descobertas na rede WiFi
-network_cameras = {
-    1: {
-        'name': 'ISCEE Camera 1 (192.168.1.3)',
-        'ip': '192.168.1.3',
-        'port': 80,
-        'user': 'admin',
-        'password': 'Herb1745@'
-    },
-    2: {
-        'name': 'ISCEE Camera 2 (192.168.1.10)',
-        'ip': '192.168.1.10',
-        'port': 80,
-        'user': 'admin',
-        'password': 'Herb1745@'
-    }
-}
+# IPs e credenciais são carregados de cameras_config.json (definidos pela tela de configurações)
+# network_cameras = {...}  # não use IPs fixos aqui
+def _load_network_cameras():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f).get('cameras', {})
+        return {i+1: {'name': c.get('name'), 'ip': c.get('ip'), 'port': c.get('port', 80),
+                      'user': c.get('user', 'admin'), 'password': c.get('password', '')}
+                for i, c in enumerate(raw.values())}
+    except:
+        return {}
+
+network_cameras = _load_network_cameras()
 
 @app.route('/')
 def index():

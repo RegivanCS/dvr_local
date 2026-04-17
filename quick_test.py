@@ -1,8 +1,26 @@
 import requests
+import json
+import os
 
-camera_ip = '192.168.1.3'
-camera_port = 80
-auth = ('admin', 'Herb1745@')
+# Carrega IP/credenciais da configuração (definidos pela tela de configurações)
+def _load_first_camera():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cameras = json.load(f).get('cameras', {})
+        if cameras:
+            cam = next(iter(cameras.values()))
+            return cam.get('ip', ''), cam.get('port', 80), cam.get('user', 'admin'), cam.get('password', '')
+    except:
+        pass
+    return None, None, None, None
+
+camera_ip, camera_port, _user, _password = _load_first_camera()
+if not camera_ip:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
+
+auth = (_user, _password)
 
 paths = [
     '/snapshot.cgi', '/image.jpg', '/tmpfs/auto.jpg', '/cgi-bin/snapshot.cgi',

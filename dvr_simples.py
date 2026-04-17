@@ -27,12 +27,8 @@ def save_config(config):
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
-        config = {
-            'cameras': [
-                {'id': 'cam1', 'name': 'Câmera 1', 'ip': '192.168.1.3', 'port': 554, 'user': 'dcmk', 'password': 'Herb1745@'},
-                {'id': 'cam2', 'name': 'Câmera 2', 'ip': '192.168.1.10', 'port': 554, 'user': 'dcmk', 'password': 'Herb1745@'}
-            ]
-        }
+        # IPs e credenciais devem ser inseridos apenas pela tela de configurações
+        config = {'cameras': {}}
         save_config(config)
         return config
     
@@ -40,12 +36,8 @@ def load_config():
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
     except:
-        config = {
-            'cameras': [
-                {'id': 'cam1', 'name': 'Câmera 1', 'ip': '192.168.1.3', 'port': 554, 'user': 'dcmk', 'password': 'Herb1745@'},
-                {'id': 'cam2', 'name': 'Câmera 2', 'ip': '192.168.1.10', 'port': 554, 'user': 'dcmk', 'password': 'Herb1745@'}
-            ]
-        }
+        # IPs e credenciais devem ser inseridos apenas pela tela de configurações
+        config = {'cameras': {}}
         save_config(config)
         return config
 

@@ -7,13 +7,26 @@ Explorar a interface web das câmeras
 import requests
 from bs4 import BeautifulSoup
 import re
+import json
+import os
+
+# Carrega câmeras da configuração (IPs são definidos pela tela de configurações)
+def _load_cameras():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f).get('cameras', {})
+        return [{'ip': c.get('ip'), 'port': c.get('port', 80), 'name': c.get('name', 'Câmera'),
+                 'user': c.get('user', ''), 'password': c.get('password', '')} for c in raw.values()]
+    except:
+        return []
 
 print("🔍 Explorando interface web das câmeras...\n")
 
-cameras = [
-    {'ip': '192.168.1.3', 'port': 80, 'name': 'Câmera 1 (Entrada)'},
-    {'ip': '192.168.1.10', 'port': 80, 'name': 'Câmera 2 (Frente)'},
-]
+cameras = _load_cameras()
+if not cameras:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 for camera in cameras:
     print(f"=" * 70)
@@ -30,8 +43,10 @@ for camera in cameras:
         print(f"   Content-Type: {r.headers.get('Content-Type', 'N/A')}")
         
         # Teste 2: Com autenticação
-        print("\n2️⃣ Teste COM autenticação (admin/Herb1745@):")
-        r = requests.get(url, auth=('admin', 'Herb1745@'), timeout=3)
+        user = camera.get('user', 'admin')
+        password = camera.get('password', '')
+        print(f"\n2\ufe0f\u20e3 Teste COM autenticação ({user}/***):")
+        r = requests.get(url, auth=(user, password), timeout=3)
         print(f"   Status: {r.status_code}")
         print(f"   Content-Type: {r.headers.get('Content-Type', 'N/A')}")
         print(f"   Tamanho: {len(r.content)} bytes")
@@ -76,7 +91,7 @@ for camera in cameras:
         alt_ports = [8080, 8888, 8899, 554, 9000, 5000]
         for port in alt_ports[:3]:
             try:
-                r = requests.get(f"http://{camera['ip']}:{port}/", auth=('admin', 'Herb1745@'), timeout=1)
+                r = requests.get(f"http://{camera['ip']}:{port}/", auth=(camera.get('user', 'admin'), camera.get('password', '')), timeout=1)
                 print(f"   ✓ Porta {port}: Status {r.status_code}")
             except:
                 print(f"   - Porta {port}: Não responde")

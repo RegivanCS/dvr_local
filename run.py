@@ -26,32 +26,10 @@ except Exception as e:
 # Criar config padrão se não existir
 if not os.path.exists("cameras_config.json"):
     import json
-    
+
+    # IPs e credenciais devem ser inseridos apenas pela tela de configurações
     default_config = {
-        "cameras": {
-            "entrada": {
-                "name": "Esntrada",
-                "ip": "192.168.1.3",
-                "port": "554",
-                "user": "admin",
-                "password": "Herb1745@",
-                "model": "iscee",
-                "path": "/snapshot.cgi",
-                "enabled": True,
-                "protocol": "rtsp"
-            },
-            "frente": {
-                "name": "Frente",
-                "ip": "192.168.1.10",
-                "port": "554",
-                "user": "admin",
-                "password": "Herb1745@",
-                "model": "iscee",
-                "path": "/snapshot.cgi",
-                "enabled": True,
-                "protocol": "rtsp"
-            }
-        }
+        "cameras": {}
     }
     
     with open("cameras_config.json", "w", encoding="utf-8") as f:

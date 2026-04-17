@@ -1,6 +1,26 @@
 import requests
 from bs4 import BeautifulSoup
 import re
+import json
+import os
+
+# Carrega IP/porta/credenciais da configuração (definidos pela tela de configurações)
+def _load_first_camera():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cameras = json.load(f).get('cameras', {})
+        if cameras:
+            cam = next(iter(cameras.values()))
+            return cam.get('ip', ''), cam.get('port', 80), cam.get('user', 'admin'), cam.get('password', '')
+    except:
+        pass
+    return None, None, None, None
+
+_ip, _port, _user, _password = _load_first_camera()
+if not _ip:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 print("=" * 60)
 print("Analisando HTML da câmera para descobrir stream URL")
@@ -8,7 +28,7 @@ print("=" * 60)
 
 try:
     # Fazer requisição para a câmera
-    response = requests.get("http://192.168.1.3:8899/", timeout=5, auth=("admin", "Herb1745"))
+    response = requests.get(f"http://{_ip}:{_port}/", timeout=5, auth=(_user, _password))
     print(f"✓ Conectado com sucesso (Status: {response.status_code})")
     print(f"Tipo: {response.headers.get('Content-Type', 'desconhecido')}")
     
@@ -74,8 +94,8 @@ common_paths = [
 
 for path in common_paths:
     try:
-        url = f"http://192.168.1.3:8899{path}"
-        response = requests.head(url, timeout=2, auth=("admin", "Herb1745"))
-        print(f"✓ {path}: {response.status_code}")
+        url = f"http://{_ip}:{_port}{path}"
+        response = requests.head(url, timeout=2, auth=(_user, _password))
+        print(f"\u2713 {path}: {response.status_code}")
     except:
         pass

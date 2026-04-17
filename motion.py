@@ -1,9 +1,35 @@
 import cv2
+import json
+import os
+from urllib.parse import quote
 
-urls = [
-    "rtsp://admin:Herb1745%40@192.168.1.3:8899/stream",
-    "rtsp://admin:Herb1745%40@192.168.1.10:8899/stream"
-]
+# Carrega URLs RTSP da configuração (IPs são definidos pela tela de configurações)
+def _build_rtsp_urls():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cameras = json.load(f).get('cameras', {}).values()
+        result = []
+        for cam in cameras:
+            ip = cam.get('ip', '')
+            port = cam.get('port', 554)
+            user = cam.get('user', '')
+            password = cam.get('password', '')
+            path = cam.get('path', '/stream')
+            if user:
+                result.append(f"rtsp://{user}:{quote(password, safe='')}@{ip}:{port}{path}")
+            else:
+                result.append(f"rtsp://{ip}:{port}{path}")
+        return result
+    except:
+        return []
+
+# IPs removidos do código; URLs são construídas a partir do cameras_config.json
+# urls = ["rtsp://..."]  # não use IPs fixos aqui
+urls = _build_rtsp_urls()
+if not urls:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 def detect_motion():
     caps = [cv2.VideoCapture(url) for url in urls]

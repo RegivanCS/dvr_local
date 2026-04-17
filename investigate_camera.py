@@ -1,5 +1,25 @@
 import requests
 import base64
+import json
+import os
+
+# Carrega IP/credenciais da configuração (definidos pela tela de configurações)
+def _load_first_camera():
+    config_path = os.path.join(os.path.dirname(__file__), 'cameras_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cameras = json.load(f).get('cameras', {})
+        if cameras:
+            cam = next(iter(cameras.values()))
+            return cam.get('ip', ''), cam.get('port', 80), cam.get('user', 'admin'), cam.get('password', '')
+    except:
+        pass
+    return None, None, None, None
+
+_ip, _port, _user, _password = _load_first_camera()
+if not _ip:
+    print("[ERRO] Nenhuma câmera configurada. Adicione câmeras pela tela de configurações.")
+    exit(1)
 
 print("=" * 60)
 print("Investigar modelo e capacidades da câmera")
@@ -16,8 +36,8 @@ endpoints = [
 
 for endpoint in endpoints:
     try:
-        url = f"http://192.168.1.3:8899{endpoint}"
-        response = requests.get(url, auth=("admin", "Herb1745"), timeout=2)
+        url = f"http://{_ip}:{_port}{endpoint}"
+        response = requests.get(url, auth=(_user, _password), timeout=2)
         if response.status_code == 200:
             print(f"\n✓ {endpoint}: Status 200")
             print(f"  Content-Type: {response.headers.get('Content-Type')}")
@@ -38,8 +58,8 @@ def capture_frames():
     print("\nTentando capturar frames continuamente de /stream...")
     
     response = requests.get(
-        "http://192.168.1.3:8899/stream",
-        auth=("admin", "Herb1745"),
+        f"http://{_ip}:{_port}/stream",
+        auth=(_user, _password),
         stream=True,
         timeout=5
     )

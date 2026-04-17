@@ -27,3 +27,5 @@ Thumbs.db
 .env
 *.bak
 test_*.py
+.dvr_secret
+cameras_config.json
