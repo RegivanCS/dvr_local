@@ -571,7 +571,92 @@ def scan_network():
     return jsonify({'cameras': cameras_found, 'network': f"{network}.0/24"})
 
 # ──────────────────────────────────────────────────────────────
-# DETECÇÃO DE MOVIMENTO + GRAVAÇÃO
+# AGENT — endpoints para o agente local (agent.py)
+# ──────────────────────────────────────────────────────────────
+_agent_state = {}   # agent_name -> {'last_seen': float, 'command': str|None}
+
+@app.route('/api/agent/heartbeat', methods=['POST'])
+@login_required
+def agent_heartbeat():
+    data = request.get_json() or {}
+    name = data.get('agent', 'unknown')
+    if name not in _agent_state:
+        _agent_state[name] = {'command': None}
+    _agent_state[name]['last_seen'] = time.time()
+    return jsonify({'ok': True})
+
+@app.route('/api/agent/command')
+@login_required
+def agent_command():
+    name = request.args.get('agent', 'unknown')
+    if name not in _agent_state:
+        _agent_state[name] = {'last_seen': time.time(), 'command': None}
+    _agent_state[name]['last_seen'] = time.time()
+    cmd = _agent_state[name].get('command')
+    # Consumir o comando (one-shot)
+    _agent_state[name]['command'] = None
+    return jsonify({'command': cmd})
+
+@app.route('/api/agent/trigger', methods=['POST'])
+@login_required
+def agent_trigger():
+    """Browser envia este endpoint para pedir scan ao agente"""
+    data = request.get_json() or {}
+    name = data.get('agent')
+    if not name or name not in _agent_state:
+        return jsonify({'success': False, 'error': 'Agente não encontrado'}), 404
+    _agent_state[name]['command'] = 'scan'
+    return jsonify({'success': True})
+
+@app.route('/api/agent/list')
+@login_required
+def agent_list():
+    """Lista agentes conectados (heartbeat nos últimos 15s)"""
+    now = time.time()
+    active = [
+        {'name': n, 'since': int(now - s.get('last_seen', now))}
+        for n, s in _agent_state.items()
+        if now - s.get('last_seen', 0) <= 15
+    ]
+    return jsonify({'agents': active})
+
+@app.route('/api/agent/results', methods=['POST'])
+@login_required
+def agent_results():
+    """Recebe resultados do scan do agente e cadastra câmeras"""
+    data = request.get_json() or {}
+    cameras = data.get('cameras', [])
+    cam_user  = data.get('cam_user', 'admin')
+    cam_pass  = data.get('cam_password', '')
+    cam_model = data.get('cam_model', 'generic')
+
+    config = load_config()
+    registered = 0
+    for cam in cameras:
+        result = test_camera_connection(cam['ip'], cam['port'], cam_user, cam_pass, cam_model)
+        if result['success']:
+            cam_id = str(int(time.time() * 1000) + registered)
+            config['cameras'][cam_id] = {
+                'name': f'Câmera ({cam["ip"]})',
+                'ip': cam['ip'],
+                'port': cam['port'],
+                'user': cam_user,
+                'password': cam_pass,
+                'model': cam_model,
+                'path': result['path'],
+                'enabled': True,
+                'created_at': datetime.now().isoformat(),
+            }
+            registered += 1
+            time.sleep(0.001)  # garante IDs únicos
+
+    if registered:
+        save_config(config)
+        logger.info(f"Agente cadastrou {registered} câmera(s)")
+
+    return jsonify({'registered': registered, 'found': len(cameras)})
+
+
 # ──────────────────────────────────────────────────────────────
 
 def _frame_hash(data: bytes) -> str:
@@ -1381,103 +1466,167 @@ SCAN_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Arial;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: white;
-            padding: 20px;
-        }
+        body { font-family: 'Segoe UI', Arial; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; color: white; padding: 20px; }
         .container { max-width: 1000px; margin: 0 auto; }
-        .header {
-            background: rgba(0, 0, 0, 0.3);
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .btn {
-            padding: 10px 20px;
-            border-radius: 6px;
-            text-decoration: none;
-            font-weight: bold;
-            border: none;
-            cursor: pointer;
-            transition: all 0.3s;
-            display: inline-block;
-        }
+        .header { background: rgba(0,0,0,0.3); padding: 20px; border-radius: 12px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .nav { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn { padding: 10px 18px; border-radius: 6px; text-decoration: none; font-weight: bold; border: none; cursor: pointer; transition: all 0.2s; display: inline-block; font-size: 0.9em; }
         .btn-primary { background: #4CAF50; color: white; }
         .btn-secondary { background: #2196F3; color: white; }
         .btn:hover { transform: translateY(-2px); }
-        .scan-container {
-            background: rgba(255, 255, 255, 0.15);
-            padding: 30px;
-            border-radius: 12px;
-            text-align: center;
-        }
-        #results { margin-top: 20px; text-align: left; }
-        .result-item {
-            background: rgba(0, 0, 0, 0.3);
-            padding: 15px;
-            margin-bottom: 10px;
-            border-radius: 8px;
-        }
+        .card { background: rgba(255,255,255,0.15); padding: 25px; border-radius: 12px; margin-bottom: 20px; }
+        .agent-box { display: flex; align-items: center; gap: 12px; background: rgba(0,0,0,0.3); border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+        .dot-green { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+        .dot-gray  { background: #7f8c8d; }
+        .result-item { background: rgba(0,0,0,0.3); padding: 12px 15px; margin-bottom: 8px; border-radius: 8px; font-size: 0.9em; }
+        .divider { border: none; border-top: 1px solid rgba(255,255,255,0.2); margin: 20px 0; }
+        #results { margin-top: 16px; text-align: left; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🔍 Scanner de Rede</h1>
-            <a href="/cameras" class="btn btn-secondary">← Voltar</a>
-        </div>
-        
-        <div class="scan-container">
-            <h2>Buscar Câmeras na Rede</h2>
-            <p style="margin: 20px 0;">Este scanner procura por câmeras IP na sua rede local.</p>
-            <button onclick="startScan()" class="btn btn-primary" id="scanBtn">🔍 Iniciar Escaneamento</button>
-            <div id="results"></div>
+<div class="container">
+    <div class="header">
+        <h1>🔍 Scanner de Rede</h1>
+        <div class="nav">
+            <a href="/" class="btn btn-secondary">🏠 Câmeras</a>
+            <a href="/cameras" class="btn btn-secondary">⚙️ Config</a>
+            <a href="/recordings" class="btn" style="background:#e67e22;">🎞️ Gravações</a>
+            <a href="/logout" class="btn" style="background:#e74c3c;">🚪 Sair</a>
         </div>
     </div>
-    
-    <script>
-        async function startScan() {
-            const btn = document.getElementById('scanBtn');
-            const results = document.getElementById('results');
-            
+
+    <!-- AGENTE LOCAL -->
+    <div class="card">
+        <h2>🤖 Agente Local <small style="font-size:0.6em; opacity:0.7;">(recomendado)</small></h2>
+        <p style="margin: 12px 0; opacity: 0.85;">
+            O agente roda na mesma rede das câmeras e escaneia localmente.<br>
+            <strong>Como usar:</strong> edite <code>DVR_PASSWORD</code> em <code>agent.py</code> e rode:
+            <code style="display:block; background:rgba(0,0,0,0.3); padding:8px 12px; border-radius:6px; margin-top:8px;">python agent.py</code>
+        </p>
+        <div id="agents-list"><p style="opacity:0.6;">Verificando agentes...</p></div>
+        <button onclick="triggerAgentScan()" class="btn btn-primary" id="agentBtn" disabled style="margin-top:12px;">
+            📡 Iniciar Scan via Agente
+        </button>
+        <div id="agent-status" style="margin-top:12px; opacity:0.8;"></div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- SCAN SERVIDOR (rede do servidor) -->
+    <div class="card">
+        <h2>🌐 Scan no Servidor <small style="font-size:0.6em; opacity:0.7;">(rede do servidor)</small></h2>
+        <p style="margin: 12px 0; opacity: 0.8;">Escaneia a rede onde o servidor está hospedado — útil apenas se câmeras estiverem na mesma rede do servidor.</p>
+        <button onclick="startServerScan()" class="btn btn-secondary" id="serverBtn">🔍 Scan no Servidor</button>
+        <div id="results"></div>
+    </div>
+</div>
+
+<script>
+let selectedAgent = null;
+
+async function loadAgents() {
+    try {
+        const r = await fetch('/api/agent/list');
+        const data = await r.json();
+        const list = document.getElementById('agents-list');
+        const btn  = document.getElementById('agentBtn');
+
+        if (data.agents.length === 0) {
+            list.innerHTML = '<div class="agent-box"><span class="dot dot-gray"></span><span>Nenhum agente conectado. Rode <code>python agent.py</code> na rede das câmeras.</span></div>';
             btn.disabled = true;
-            btn.textContent = '⏳ Escaneando... (aguarde alguns minutos)';
-            results.innerHTML = '<p style="text-align: center;">Buscando câmeras na rede...</p>';
-            
-            try {
-                const response = await fetch('/api/scan', { method: 'POST' });
-                const data = await response.json();
-                
-                results.innerHTML = `<h3>✓ Encontradas ${data.cameras.length} câmera(s) na rede ${data.network}:</h3>`;
-                
-                if (data.cameras.length > 0) {
-                    data.cameras.forEach(cam => {
-                        results.innerHTML += `
-                            <div class="result-item">
-                                <strong>IP:</strong> ${cam.ip}<br>
-                                <strong>Porta:</strong> ${cam.port}<br>
-                                <strong>URL:</strong> ${cam.url}
-                            </div>
-                        `;
-                    });
-                    results.innerHTML += '<p style="margin-top: 15px;">Adicione estas câmeras manualmente na página de configuração.</p>';
-                } else {
-                    results.innerHTML += '<p>⚠️ Nenhuma câmera encontrada. Tente adicionar manualmente.</p>';
-                }
-            } catch (error) {
-                results.innerHTML = `<p style="color: #f44336;">✗ Erro: ${error}</p>`;
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '🔍 Iniciar Escaneamento';
-            }
+        } else {
+            list.innerHTML = data.agents.map(a => `
+                <div class="agent-box" onclick="selectAgent('${a.name}', this)" style="cursor:pointer;" id="agent-${a.name}">
+                    <span class="dot dot-green"></span>
+                    <span><strong>${a.name}</strong> — conectado há ${a.since}s</span>
+                </div>`).join('');
+            selectedAgent = data.agents[0].name;
+            document.getElementById('agent-' + selectedAgent).style.border = '2px solid #2ecc71';
+            btn.disabled = false;
         }
-    </script>
+    } catch(e) {}
+}
+
+function selectAgent(name, el) {
+    document.querySelectorAll('.agent-box').forEach(b => b.style.border = 'none');
+    el.style.border = '2px solid #2ecc71';
+    selectedAgent = name;
+    document.getElementById('agentBtn').disabled = false;
+}
+
+async function triggerAgentScan() {
+    if (!selectedAgent) return;
+    const btn = document.getElementById('agentBtn');
+    const status = document.getElementById('agent-status');
+    btn.disabled = true;
+    btn.textContent = '⏳ Aguardando agente...';
+    status.textContent = '';
+
+    try {
+        const r = await fetch('/api/agent/trigger', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({agent: selectedAgent})
+        });
+        const d = await r.json();
+        if (!d.success) {
+            status.textContent = '✗ ' + d.error;
+            btn.disabled = false;
+            btn.textContent = '📡 Iniciar Scan via Agente';
+            return;
+        }
+        status.innerHTML = '⏳ Scan em andamento na rede local... aguarde o agente concluir (1-3 min)';
+        // Verificar a cada 5s se novas câmeras foram adicionadas
+        let checks = 0;
+        const interval = setInterval(async () => {
+            checks++;
+            try {
+                const cr = await fetch('/cameras');
+                // Não há endpoint JSON de câmeras, apenas verificamos via poll simples
+                status.innerHTML = `⏳ Aguardando resultados... (${checks * 5}s) — <a href="/cameras" style="color:#fff;">ver câmeras cadastradas</a>`;
+            } catch(e) {}
+            if (checks >= 36) {  // 3 minutos
+                clearInterval(interval);
+                status.innerHTML = '✅ Verifique as <a href="/cameras" style="color:#fff;">câmeras cadastradas</a>.';
+                btn.disabled = false;
+                btn.textContent = '📡 Iniciar Scan via Agente';
+            }
+        }, 5000);
+    } catch(e) {
+        status.textContent = '✗ Erro: ' + e;
+        btn.disabled = false;
+        btn.textContent = '📡 Iniciar Scan via Agente';
+    }
+}
+
+async function startServerScan() {
+    const btn = document.getElementById('serverBtn');
+    const results = document.getElementById('results');
+    btn.disabled = true;
+    btn.textContent = '⏳ Escaneando...';
+    results.innerHTML = '<p style="margin-top:12px; opacity:0.7;">Buscando câmeras na rede do servidor...</p>';
+    try {
+        const r = await fetch('/api/scan', { method: 'POST' });
+        const data = await r.json();
+        results.innerHTML = `<p style="margin-top:12px;"><strong>${data.cameras.length}</strong> câmera(s) encontrada(s) na rede ${data.network}:</p>`;
+        data.cameras.forEach(cam => {
+            results.innerHTML += `<div class="result-item"><strong>${cam.ip}:${cam.port}</strong> — ${cam.url}</div>`;
+        });
+        if (!data.cameras.length)
+            results.innerHTML += '<p style="opacity:0.6; margin-top:8px;">Nenhuma câmera encontrada na rede do servidor.</p>';
+    } catch(e) {
+        results.innerHTML = `<p style="color:#e74c3c; margin-top:12px;">✗ Erro: ${e}</p>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔍 Scan no Servidor';
+    }
+}
+
+// Atualizar lista de agentes a cada 5s
+loadAgents();
+setInterval(loadAgents, 5000);
+</script>
 </body>
 </html>
 """
