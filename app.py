@@ -1631,6 +1631,478 @@ setInterval(loadAgents, 5000);
 </html>
 """
 
+# ─── API JSON: lista câmeras ────────────────────────────────────────────────
+@app.route('/api/cameras', methods=['GET'])
+@login_required
+def api_cameras_list():
+    config = load_config()
+    cameras = config.get('cameras', {})
+    result = []
+    for cam_id, c in cameras.items():
+        result.append({
+            'id': cam_id,
+            'name': c.get('name', cam_id),
+            'ip': c.get('ip', ''),
+            'port': c.get('port', 80),
+            'enabled': c.get('enabled', True),
+            'snapshot_url': c.get('snapshot_url', ''),
+            'stream_url': c.get('stream_url', ''),
+        })
+    return jsonify({'cameras': result})
+
+
+# ─── PWA manifest ────────────────────────────────────────────────────────────
+@app.route('/manifest.json')
+def pwa_manifest():
+    manifest = {
+        "name": "DVR Local",
+        "short_name": "DVR",
+        "description": "Monitore câmeras e escaneie a rede local",
+        "start_url": "/pwa",
+        "display": "standalone",
+        "background_color": "#1a1a2e",
+        "theme_color": "#667eea",
+        "icons": [
+            {"src": "/pwa-icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/pwa-icon-512.png", "sizes": "512x512", "type": "image/png"}
+        ]
+    }
+    from flask import Response
+    return Response(json.dumps(manifest), mimetype='application/json')
+
+
+# ─── PWA Service Worker ───────────────────────────────────────────────────────
+@app.route('/sw.js')
+def pwa_sw():
+    sw = """
+const CACHE = 'dvr-pwa-v1';
+const OFFLINE = ['/pwa'];
+self.addEventListener('install', e => e.waitUntil(
+    caches.open(CACHE).then(c => c.addAll(OFFLINE))
+));
+self.addEventListener('fetch', e => {
+    e.respondWith(
+        fetch(e.request).catch(() => caches.match(e.request))
+    );
+});
+"""
+    from flask import Response
+    return Response(sw, mimetype='application/javascript')
+
+
+# ─── PWA ícones simplificados (SVG→PNG inline) ────────────────────────────────
+@app.route('/pwa-icon-192.png')
+@app.route('/pwa-icon-512.png')
+def pwa_icon():
+    # Ícone SVG simples gerado como PNG via data URI não é possível puramente em Flask,
+    # então retornamos um redirect para um SVG que os browsers aceitam como ícone
+    svg = b'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect width="100" height="100" rx="20" fill="#667eea"/>
+  <text x="50" y="68" font-size="55" text-anchor="middle" fill="white">&#128247;</text>
+</svg>'''
+    from flask import Response
+    return Response(svg, mimetype='image/svg+xml')
+
+
+# ─── PWA principal ────────────────────────────────────────────────────────────
+PWA_TEMPLATE = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#667eea">
+<link rel="manifest" href="/manifest.json">
+<title>DVR Local</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#1a1a2e;--card:#16213e;--accent:#667eea;--accent2:#764ba2;--text:#eee;--sub:#aaa;--green:#2ecc71;--red:#e74c3c;--orange:#e67e22}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',Arial;min-height:100vh;padding-bottom:70px}
+.topbar{background:linear-gradient(135deg,var(--accent),var(--accent2));padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
+.topbar h1{font-size:1.2em;letter-spacing:1px}
+.topbar a{color:#fff;font-size:0.8em;text-decoration:none;background:rgba(0,0,0,0.25);padding:5px 10px;border-radius:20px}
+.tabs{display:flex;background:var(--card);border-bottom:1px solid rgba(255,255,255,0.08)}
+.tab{flex:1;padding:13px 6px;text-align:center;font-size:0.85em;cursor:pointer;transition:all .2s;border-bottom:3px solid transparent;color:var(--sub)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.page{display:none;padding:16px}
+.page.active{display:block}
+.card{background:var(--card);border-radius:12px;padding:16px;margin-bottom:12px}
+.cam-img{width:100%;border-radius:8px;aspect-ratio:16/9;object-fit:cover;background:#000;display:block}
+.cam-name{font-weight:bold;margin:8px 0 4px}
+.cam-sub{font-size:0.8em;color:var(--sub)}
+.btn{padding:10px 18px;border-radius:8px;border:none;cursor:pointer;font-weight:bold;font-size:0.9em;transition:all .2s;display:inline-block}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.btn-success{background:var(--green);color:#fff}
+.btn-danger{background:var(--red);color:#fff}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn:active{transform:scale(0.97)}
+.btn-block{width:100%;text-align:center;margin-bottom:8px}
+.badge{display:inline-block;padding:3px 8px;border-radius:20px;font-size:0.75em;font-weight:bold}
+.badge-green{background:rgba(46,204,113,.2);color:var(--green)}
+.badge-red{background:rgba(231,76,60,.2);color:var(--red)}
+.progress-bar{height:6px;background:rgba(255,255,255,0.1);border-radius:3px;margin:12px 0;overflow:hidden}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:3px;transition:width .3s}
+.result-item{padding:10px 12px;background:rgba(255,255,255,0.05);border-radius:8px;margin-bottom:6px;font-size:0.85em}
+.result-item strong{color:var(--green)}
+.log{font-size:0.75em;color:var(--sub);margin-top:6px;max-height:120px;overflow-y:auto;font-family:monospace}
+.row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.row .lbl{font-size:0.85em;color:var(--sub);width:80px;flex-shrink:0}
+.row input{flex:1;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:6px;padding:8px;color:#fff;font-size:0.9em}
+.empty{text-align:center;color:var(--sub);padding:40px 20px;font-size:0.9em}
+.rec-thumb{width:100%;border-radius:8px;aspect-ratio:16/9;object-fit:cover;background:#111}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(min-width:600px){.grid2{grid-template-columns:repeat(3,1fr)}}
+.fullscreen-overlay{display:none;position:fixed;inset:0;background:#000;z-index:999;align-items:center;justify-content:center}
+.fullscreen-overlay.open{display:flex}
+.fullscreen-overlay img{max-width:100%;max-height:100%}
+.close-fs{position:absolute;top:16px;right:16px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:40px;height:40px;font-size:1.2em;cursor:pointer}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>📷 DVR Local</h1>
+  <a href="/logout">Sair</a>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('cameras',this)">📷 Câmeras</div>
+  <div class="tab" onclick="switchTab('scanner',this)">📡 Scanner</div>
+  <div class="tab" onclick="switchTab('recordings',this)">🎞️ Gravações</div>
+</div>
+
+<!-- ═══════════════════════════════ CÂMERAS ══════════════════════════════════ -->
+<div id="page-cameras" class="page active">
+  <div id="cam-list"><div class="empty">Carregando câmeras...</div></div>
+  <button class="btn btn-primary btn-block" onclick="loadCameras()" style="margin-top:8px">↻ Atualizar</button>
+</div>
+
+<!-- ═══════════════════════════════ SCANNER ══════════════════════════════════ -->
+<div id="page-scanner" class="page">
+  <div class="card">
+    <h3>🌐 Scan Local (este dispositivo)</h3>
+    <p style="font-size:.85em;color:var(--sub);margin:8px 0 12px">
+      Detecta automaticamente sua sub-rede Wi-Fi e escaneia em busca de câmeras HTTP.
+      Os resultados são enviados para o servidor e as câmeras são cadastradas.
+    </p>
+
+    <div class="row"><span class="lbl">Agente ID</span><input id="agentId" placeholder="carregando..."></div>
+    <div class="row"><span class="lbl">Usuário cam</span><input id="camUser" value="admin"></div>
+    <div class="row"><span class="lbl">Senha cam</span><input id="camPass" type="password" placeholder="senha da câmera"></div>
+
+    <button id="scanBtn" class="btn btn-success btn-block" onclick="startScan()">📡 Iniciar Scan</button>
+    <div id="progress-wrap" style="display:none">
+      <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+      <p id="progress-label" style="font-size:.8em;color:var(--sub);text-align:center"></p>
+    </div>
+    <div id="scan-log" class="log"></div>
+  </div>
+
+  <div id="scan-results"></div>
+</div>
+
+<!-- ═══════════════════════════════ GRAVAÇÕES ═════════════════════════════════ -->
+<div id="page-recordings" class="page">
+  <div id="rec-grid" class="grid2"><div class="empty" style="grid-column:span 2">Carregando gravações...</div></div>
+</div>
+
+<!-- Fullscreen image viewer -->
+<div class="fullscreen-overlay" id="fsOverlay" onclick="closeFull()">
+  <img id="fsImg" src="">
+  <button class="close-fs" onclick="closeFull()">✕</button>
+</div>
+
+<script>
+// ─── Estado ──────────────────────────────────────────────────────────────────
+const DVR = location.origin;
+let agentName = localStorage.getItem('dvr_agent_id') || 'mobile_' + Math.random().toString(36).slice(2,8);
+localStorage.setItem('dvr_agent_id', agentName);
+let heartbeatTimer = null;
+
+// ─── Tabs ─────────────────────────────────────────────────────────────────────
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('page-' + name).classList.add('active');
+  if (name === 'cameras') loadCameras();
+  if (name === 'scanner') initScanner();
+  if (name === 'recordings') loadRecordings();
+}
+
+// ─── Câmeras ──────────────────────────────────────────────────────────────────
+async function loadCameras() {
+  const list = document.getElementById('cam-list');
+  try {
+    const r = await fetch(DVR + '/api/cameras');
+    if (r.status === 401) { list.innerHTML = '<div class="empty">Sessão expirada — <a href="/login" style="color:var(--accent)">entrar</a></div>'; return; }
+    const {cameras} = await r.json();
+    if (!cameras.length) { list.innerHTML = '<div class="empty">Nenhuma câmera cadastrada.<br>Use o Scanner para encontrar câmeras.</div>'; return; }
+    list.innerHTML = cameras.map(c => `
+      <div class="card">
+        <img class="cam-img" src="${c.snapshot_url || '/api/camera/'+c.id+'/snapshot_img'}" alt="${c.name}"
+          onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 320 180%22><rect fill=%22%23111%22 width=%22320%22 height=%22180%22/><text x=%22160%22 y=%2295%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2214%22>sem sinal</text></svg>'"
+        >
+        <div class="cam-name">${c.name} <span class="badge ${c.enabled ? 'badge-green' : 'badge-red'}">${c.enabled ? 'ativa' : 'inativa'}</span></div>
+        <div class="cam-sub">${c.ip}:${c.port}</div>
+        <div style="display:flex;gap:6px;margin-top:10px">
+          <button class="btn btn-primary" style="flex:1" onclick="takeSnap('${c.id}')">📸 Foto</button>
+          <a href="${c.stream_url || '#'}" target="_blank" class="btn" style="flex:1;background:var(--orange);color:#fff;text-align:center">▶ Stream</a>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    list.innerHTML = `<div class="empty">Erro ao carregar: ${e}</div>`;
+  }
+}
+
+async function takeSnap(camId) {
+  try {
+    await fetch(DVR + '/api/camera/' + camId + '/snapshot', {method:'POST'});
+    alert('Foto salva nas gravações!');
+  } catch(e) { alert('Erro: ' + e); }
+}
+
+// ─── Scanner ──────────────────────────────────────────────────────────────────
+function initScanner() {
+  document.getElementById('agentId').value = agentName;
+  startHeartbeat();
+}
+
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  sendHeartbeat();
+  heartbeatTimer = setInterval(sendHeartbeat, 8000);
+}
+
+async function sendHeartbeat() {
+  try {
+    await fetch(DVR + '/api/agent/heartbeat', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({agent: agentName, platform: 'mobile-pwa'})
+    });
+  } catch(e) {}
+}
+
+// Detectar IP local via WebRTC
+function getLocalIP() {
+  return new Promise(resolve => {
+    const pc = new RTCPeerConnection({iceServers:[]});
+    pc.createDataChannel('');
+    pc.createOffer().then(o => pc.setLocalDescription(o));
+    const timeout = setTimeout(() => { pc.close(); resolve(null); }, 3000);
+    pc.onicecandidate = e => {
+      if (!e.candidate) return;
+      const m = e.candidate.candidate.match(/([0-9]{1,3}(?:[.][0-9]{1,3}){3})/);
+      if (m && !m[1].startsWith('127.')) {
+        clearTimeout(timeout);
+        pc.close();
+        resolve(m[1]);
+      }
+    };
+  });
+}
+
+function getSubnet(ip) {
+  const parts = ip.split('.');
+  return parts[0] + '.' + parts[1] + '.' + parts[2];
+}
+
+function log(msg) {
+  const el = document.getElementById('scan-log');
+  el.innerHTML += msg + '\\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+const PORTS = [80, 8080, 8000, 554, 81, 82, 8888];
+const CAM_PATHS = ['/snapshot.jpg', '/cgi-bin/snapshot.cgi', '/image/jpeg.cgi', '/Streaming/Channels/1/picture'];
+
+async function probeHost(ip, port, signal) {
+  const urls = CAM_PATHS.map(p => `http://${ip}:${port}${p}`);
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, {signal, mode:'no-cors'});
+      return {ip, port, url};
+    } catch(e) {
+      if (e.name === 'AbortError') return null;
+    }
+  }
+  return null;
+}
+
+async function startScan() {
+  const btn = document.getElementById('scanBtn');
+  const pwrap = document.getElementById('progress-wrap');
+  const fill  = document.getElementById('progressFill');
+  const plabel = document.getElementById('progress-label');
+  const results = document.getElementById('scan-results');
+  const logEl  = document.getElementById('scan-log');
+  logEl.innerHTML = '';
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Detectando IP local...';
+  pwrap.style.display = 'block';
+  results.innerHTML = '';
+  fill.style.width = '0%';
+
+  // Atualizar agentName com valor do input
+  agentName = document.getElementById('agentId').value || agentName;
+  localStorage.setItem('dvr_agent_id', agentName);
+  const camUser = document.getElementById('camUser').value;
+  const camPass = document.getElementById('camPass').value;
+
+  const localIP = await getLocalIP();
+  if (!localIP) {
+    log('⚠ Não foi possível detectar IP local. Tente conectar ao Wi-Fi das câmeras.');
+    btn.disabled = false;
+    btn.textContent = '📡 Iniciar Scan';
+    return;
+  }
+  const subnet = getSubnet(localIP);
+  log(`📍 IP local: ${localIP}  |  Sub-rede: ${subnet}.0/24`);
+  btn.textContent = `⏳ Escaneando ${subnet}.0/24...`;
+
+  const hosts = Array.from({length:254}, (_,i) => subnet + '.' + (i+1));
+  const found = [];
+  let done = 0;
+  const BATCH = 15;
+
+  for (let i = 0; i < hosts.length; i += BATCH) {
+    const batch = hosts.slice(i, i + BATCH);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+
+    const promises = batch.flatMap(ip =>
+      PORTS.map(port => probeHost(ip, port, controller.signal))
+    );
+    const batchResults = await Promise.all(promises);
+    clearTimeout(timer);
+
+    batchResults.forEach(r => {
+      if (r) {
+        found.push(r);
+        log(`✅ ${r.ip}:${r.port} → ${r.url}`);
+      }
+    });
+
+    done += batch.length;
+    const pct = Math.round((done / hosts.length) * 100);
+    fill.style.width = pct + '%';
+    plabel.textContent = `${done}/254 hosts — ${found.length} encontrada(s)`;
+  }
+
+  plabel.textContent = `Concluído — ${found.length} câmera(s) encontrada(s)`;
+  btn.disabled = false;
+  btn.textContent = '📡 Iniciar Scan';
+
+  if (!found.length) {
+    results.innerHTML = '<div class="card"><div class="empty">Nenhuma câmera encontrada nesta rede.</div></div>';
+    return;
+  }
+
+  // Exibir resultados
+  results.innerHTML = `<div class="card"><h3 style="margin-bottom:10px">✅ ${found.length} câmera(s) encontrada(s)</h3>` +
+    found.map(r => `<div class="result-item"><strong>${r.ip}:${r.port}</strong><br><span style="color:var(--sub)">${r.url}</span></div>`).join('') +
+    `<button class="btn btn-success btn-block" style="margin-top:12px" onclick="registerAll()">☁️ Cadastrar no Servidor</button></div>`;
+
+  window._scanFound = found;
+  window._scanMeta  = {camUser, camPass, subnet, agentName};
+}
+
+async function registerAll() {
+  const found = window._scanFound || [];
+  const meta  = window._scanMeta  || {};
+  if (!found.length) return;
+
+  try {
+    const r = await fetch(DVR + '/api/agent/results', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        agent: meta.agentName || agentName,
+        cameras: found.map(c => ({
+          ip: c.ip, port: c.port, url: c.url,
+          user: meta.camUser, password: meta.camPass, model: 'auto'
+        }))
+      })
+    });
+    const d = await r.json();
+    if (d.registered !== undefined) {
+      alert(`✅ ${d.registered} câmera(s) cadastrada(s) no servidor!`);
+    } else {
+      alert('Enviado. Verifique /cameras no servidor.');
+    }
+  } catch(e) {
+    alert('Erro ao cadastrar: ' + e);
+  }
+}
+
+// ─── Gravações ────────────────────────────────────────────────────────────────
+async function loadRecordings() {
+  const grid = document.getElementById('rec-grid');
+  try {
+    const r = await fetch(DVR + '/api/recordings');
+    if (r.status === 404) {
+      // endpoint pode não existir — mostrar link
+      grid.innerHTML = '<div class="empty" style="grid-column:span 2"><a href="/recordings" style="color:var(--accent)">Ver gravações no navegador</a></div>';
+      return;
+    }
+    const {files} = await r.json();
+    if (!files || !files.length) {
+      grid.innerHTML = '<div class="empty" style="grid-column:span 2">Nenhuma gravação ainda.</div>';
+      return;
+    }
+    grid.innerHTML = files.map(f => `
+      <div onclick="openFull('${f.url}')">
+        <img class="rec-thumb" src="${f.url}" alt="${f.name}" onerror="this.style.display='none'">
+        <div style="font-size:.7em;color:var(--sub);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.name}</div>
+      </div>`).join('');
+  } catch(e) {
+    grid.innerHTML = `<div class="empty" style="grid-column:span 2">Erro: ${e}<br><a href="/recordings" style="color:var(--accent)">Abrir página de gravações</a></div>`;
+  }
+}
+
+function openFull(url) {
+  document.getElementById('fsImg').src = url;
+  document.getElementById('fsOverlay').classList.add('open');
+}
+function closeFull() {
+  document.getElementById('fsOverlay').classList.remove('open');
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+loadCameras();
+</script>
+</body>
+</html>"""
+
+
+@app.route('/pwa')
+@login_required
+def pwa():
+    return PWA_TEMPLATE
+
+
+# ─── API JSON: gravações (para PWA) ───────────────────────────────────────────
+@app.route('/api/recordings', methods=['GET'])
+@login_required
+def api_recordings_list():
+    import glob
+    files = []
+    if os.path.isdir(RECORDINGS_DIR):
+        for path in sorted(glob.glob(os.path.join(RECORDINGS_DIR, '**', '*.jpg'), recursive=True), reverse=True)[:60]:
+            rel = os.path.relpath(path, RECORDINGS_DIR).replace('\\', '/')
+            parts = rel.split('/')
+            cam_id = parts[0] if len(parts) > 1 else 'unknown'
+            name = parts[-1]
+            files.append({'name': name, 'cam_id': cam_id, 'url': f'/recordings/{cam_id}/{name}'})
+    return jsonify({'files': files})
+
+
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("🚀 DVR Local - Sistema de Câmeras Iniciando...")
