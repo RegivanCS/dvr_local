@@ -1869,6 +1869,23 @@ CONFIG_TEMPLATE = """
     
     <script>
         let editingCamId = null;
+
+        async function parseJsonSafe(response) {
+            const txt = await response.text();
+            try {
+                return { ok: true, data: JSON.parse(txt), raw: txt };
+            } catch (_) {
+                return { ok: false, data: null, raw: txt };
+            }
+        }
+
+        function ensureJsonResponse(parsed) {
+            if (parsed.ok) return parsed.data;
+            if (parsed.raw && parsed.raw.includes('/login')) {
+                throw new Error('Sessão expirada. Faça login novamente.');
+            }
+            throw new Error('Resposta inválida do servidor. Atualize a página (Ctrl+F5).');
+        }
         
         document.getElementById('cameraForm').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -1885,8 +1902,8 @@ CONFIG_TEMPLATE = """
                     method: 'POST',
                     body: formData
                 });
-                
-                const result = await response.json();
+                const parsed = await parseJsonSafe(response);
+                const result = ensureJsonResponse(parsed);
                 
                 if (result.success) {
                     alert(camId ? '✓ Câmera editada com sucesso!' : '✓ Câmera adicionada com sucesso!');
@@ -1905,7 +1922,8 @@ CONFIG_TEMPLATE = """
         async function editCamera(camId) {
             try {
                 const response = await fetch(`/api/camera/get/${camId}`);
-                const result = await response.json();
+                const parsed = await parseJsonSafe(response);
+                const result = ensureJsonResponse(parsed);
                 
                 if (result.success) {
                     const cam = result.camera;
@@ -1964,7 +1982,8 @@ CONFIG_TEMPLATE = """
         async function takeSnapshot(camId) {
             try {
                 const r = await fetch(`/api/camera/${camId}/snapshot`, { method: 'POST' });
-                const d = await r.json();
+                const parsed = await parseJsonSafe(r);
+                const d = ensureJsonResponse(parsed);
                 if (d.success) alert(`✓ Snapshot salvo: ${d.file}`);
                 else alert('✗ Erro: ' + (d.error || 'falha'));
             } catch(e) { alert('Erro: ' + e); }
@@ -1977,7 +1996,8 @@ CONFIG_TEMPLATE = """
             const url = `/api/camera/${camId}/motion/${active ? 'stop' : 'start'}`;
             try {
                 const r = await fetch(url, { method: 'POST' });
-                const d = await r.json();
+                const parsed = await parseJsonSafe(r);
+                const d = ensureJsonResponse(parsed);
                 if (d.success) {
                     _motionActive[camId] = !active;
                     btn.textContent = _motionActive[camId] ? '⏹️ Parar Detecção' : '🎬 Detecção';
@@ -1990,7 +2010,8 @@ CONFIG_TEMPLATE = """
         document.querySelectorAll('[id^="motion-btn-"]').forEach(btn => {
             const camId = btn.id.replace('motion-btn-', '');
             fetch(`/api/camera/${camId}/motion/status`)
-                .then(r => r.json())
+                .then(parseJsonSafe)
+                .then(ensureJsonResponse)
                 .then(d => {
                     _motionActive[camId] = d.active;
                     if (d.active) {
@@ -2013,7 +2034,8 @@ CONFIG_TEMPLATE = """
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({user, password: pass})
                 });
-                const data = await res.json();
+                const parsed = await parseJsonSafe(res);
+                const data = ensureJsonResponse(parsed);
                 if (data.success) {
                     alert('Credenciais atualizadas! Faça login novamente.');
                     window.location.href = '/logout';
