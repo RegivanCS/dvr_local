@@ -45,6 +45,7 @@ CAMERAS = [
 ]
 
 HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (DVR-Camera-Viewer/1.0)'}
+MONITOR_INTERVAL = 60
 # ─────────────────────────────────────────────
 
 CLOUDFLARED_URL = (
@@ -164,6 +165,81 @@ def register_tunnel_camera(session, cam, tunnel_url):
         print(f'  ✗ Falha no DVR: {result.get("error")}')
 
 
+def list_dvr_cameras(session):
+    """Retorna lista de câmeras cadastradas no DVR."""
+    r = session.get(f'{DVR_URL}/api/cameras', timeout=10)
+    payload = r.json() if r.ok else {}
+    if isinstance(payload, dict) and isinstance(payload.get('cameras'), list):
+        return payload.get('cameras', [])
+    if isinstance(payload, dict):
+        return list(payload.values())
+    return []
+
+
+def ensure_cameras_healthy(session, active_pairs):
+    """Auto-heal: garante câmeras esperadas ativas e apontando para o host correto."""
+    try:
+        current = list_dvr_cameras(session)
+    except Exception as e:
+        print(f'  ⚠️  Health-check: não foi possível listar câmeras: {e}')
+        return
+
+    by_name = {str(c.get('name', '')): c for c in current}
+
+    for cam, tunnel_url in active_pairs:
+        expected_name = cam['name']
+        expected_host = tunnel_url.replace('https://', '').replace('http://', '').rstrip('/')
+        row = by_name.get(expected_name)
+        if not row:
+            # Se sumiu por qualquer motivo, recadastra
+            print(f'  ⚠️  {expected_name}: não encontrada no DVR, recadastrando...')
+            register_tunnel_camera(session, cam, tunnel_url)
+            continue
+
+        cam_id = str(row.get('id', ''))
+        if cam_id:
+            cam['id'] = cam_id
+
+        changed = False
+        # Reativa se estiver desabilitada
+        if not row.get('enabled', True) and cam_id:
+            try:
+                tr = session.post(f'{DVR_URL}/api/camera/toggle/{cam_id}', timeout=10)
+                ok = tr.ok and tr.json().get('success', False)
+                if ok:
+                    print(f'  ✓ {expected_name}: reativada automaticamente')
+                    changed = True
+            except Exception as e:
+                print(f'  ✗ {expected_name}: erro ao reativar: {e}')
+
+        # Corrige host/path caso tunnel tenha mudado
+        current_host = str(row.get('ip', '')).strip()
+        current_path = str(row.get('path', '')).strip() or '/snapshot.jpg'
+        expected_path = cam.get('path', '/snapshot.jpg')
+        if (current_host != expected_host or current_path != expected_path) and cam_id:
+            data = {
+                'name': expected_name,
+                'ip': expected_host,
+                'port': '443',
+                'user': CAM_USER,
+                'password': CAM_PASSWORD,
+                'model': CAM_MODEL,
+                'path': expected_path,
+                'skip_test': 'true',
+            }
+            try:
+                er = session.post(f'{DVR_URL}/api/camera/edit/{cam_id}', data=data, timeout=15)
+                ok = er.ok and er.json().get('success', False)
+                if ok:
+                    print(f'  ✓ {expected_name}: URL sincronizada ({expected_host})')
+                    changed = True
+            except Exception as e:
+                print(f'  ✗ {expected_name}: erro ao sincronizar URL: {e}')
+
+        if not changed:
+            print(f'  • {expected_name}: OK')
+
+
 # ── MAIN ─────────────────────────────────────
 print('=' * 60)
 print('🚇 Cloudflare Tunnel Relay — DVR Câmeras')
@@ -210,13 +286,22 @@ if active:
         print(f'  {cam["ip"]}:{cam["port"]}  →  {url}')
     print('=' * 60)
     print('\n✅ DVR atualizado! Acesse https://dvr.regivan.tec.br')
+    print(f'   Auto-heal ativo: checagem a cada {MONITOR_INTERVAL}s')
     print('   Pressione Ctrl+C para encerrar os tunnels.\n')
 else:
     print('\n✗ Nenhum tunnel ativo. Encerrando.')
     sys.exit(1)
 
 try:
+    last_monitor = 0
     while True:
+        now = time.time()
+        if now - last_monitor >= MONITOR_INTERVAL:
+            last_monitor = now
+            s = login_dvr()
+            if s:
+                print('\n🔎 Health-check do DVR...')
+                ensure_cameras_healthy(s, active)
         time.sleep(10)
 except KeyboardInterrupt:
     print('\n\nEncerrando tunnels...')
