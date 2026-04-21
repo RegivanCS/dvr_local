@@ -12,8 +12,31 @@ import cv2
 import os
 import time
 import threading
+import subprocess
+import shutil
+import glob
 from datetime import datetime
 from urllib.parse import quote
+
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(errors='replace')
+
+
+def _find_ffmpeg():
+    ff = shutil.which('ffmpeg')
+    if ff:
+        return ff
+    for pattern in ['C:/ffmpeg/*/bin/ffmpeg.exe', 'C:/ffmpeg/bin/ffmpeg.exe']:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
+FFMPEG = _find_ffmpeg()
 
 # ─────────────────────────────────────────────
 # CONFIGURAÇÕES — edite conforme necessário
@@ -109,13 +132,38 @@ def camera_worker(cam: dict):
                         ts_str     = datetime.now().strftime('%Y%m%d_%H%M%S')
                         video_path = os.path.join(cam_dir, f'motion_{ts_str}.mp4')
                         h, w       = frame.shape[:2]
-                        fourcc     = cv2.VideoWriter_fourcc(*'mp4v')
-                        writer     = cv2.VideoWriter(video_path, fourcc, RECORD_FPS, (w, h))
+                        if FFMPEG:
+                            # Grava H.264 via ffmpeg (compatível com browsers)
+                            writer = subprocess.Popen(
+                                [
+                                    FFMPEG, '-y',
+                                    '-f', 'rawvideo', '-vcodec', 'rawvideo',
+                                    '-s', f'{w}x{h}', '-pix_fmt', 'bgr24',
+                                    '-r', str(RECORD_FPS), '-i', 'pipe:0',
+                                    '-vcodec', 'libx264', '-preset', 'fast',
+                                    '-crf', '23', '-pix_fmt', 'yuv420p',
+                                    '-movflags', '+faststart',
+                                    video_path,
+                                ],
+                                stdin=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                            )
+                        else:
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            writer = cv2.VideoWriter(video_path, fourcc, RECORD_FPS, (w, h))
                         print(f"[{cam['name']}] 📹 Gravando: {video_path}")
-                    writer.write(frame)
+                    # Escreve frame
+                    if FFMPEG and hasattr(writer, 'stdin') and writer.stdin:
+                        writer.stdin.write(frame.tobytes())
+                    elif hasattr(writer, 'write'):
+                        writer.write(frame)
                 else:
                     if writer is not None:
-                        writer.release()
+                        if FFMPEG and hasattr(writer, 'stdin') and writer.stdin:
+                            writer.stdin.close()
+                            writer.wait()
+                        elif hasattr(writer, 'release'):
+                            writer.release()
                         writer = None
                         print(f"[{cam['name']}] 💾 Gravação salva: {video_path}")
                         video_path = None
@@ -124,7 +172,11 @@ def camera_worker(cam: dict):
             print(f"[{cam['name']}] Erro: {e}")
         finally:
             if writer is not None:
-                writer.release()
+                if FFMPEG and hasattr(writer, 'stdin') and writer.stdin:
+                    writer.stdin.close()
+                    writer.wait()
+                elif hasattr(writer, 'release'):
+                    writer.release()
             cap.release()
             time.sleep(3)
 

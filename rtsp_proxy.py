@@ -18,6 +18,12 @@ import os
 import tempfile
 from urllib.parse import quote
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(errors='replace')
+
 # ─────────────────────────────────────────────
 CAMERAS = [
     {'ip': '192.168.1.5', 'rtsp_port': 554, 'user': 'admin', 'password': '!Rede!123', 'http_port': 8191},

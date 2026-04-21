@@ -17,8 +17,15 @@ import subprocess
 import threading
 import time
 import shutil
+import glob
 from datetime import datetime
-from flask import Flask, send_file, render_template_string, abort
+from flask import Flask, send_file, render_template_string, abort, request, Response
+
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(errors='replace')
 
 # ─────────────────────────────────────────────
 DVR_URL      = 'https://dvr.regivan.tec.br'
@@ -28,12 +35,26 @@ PORT         = 8290
 # ─────────────────────────────────────────────
 
 _APP_DIR       = os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_ffmpeg():
+    ff = shutil.which('ffmpeg')
+    if ff:
+        return ff
+    for pattern in ['C:/ffmpeg/*/bin/ffmpeg.exe', 'C:/ffmpeg/bin/ffmpeg.exe']:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
+FFMPEG = _find_ffmpeg()
 RECORDINGS_DIR = os.path.join(_APP_DIR, 'recordings')
 
 app = Flask(__name__)
 
 TEMPLATE = """<!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -72,12 +93,17 @@ a{color:inherit;text-decoration:none}
 .snap-thumb{width:140px;height:84px;object-fit:cover;display:block}
 .snap-info{padding:6px 8px}
 .snap-time{font-size:.75em;color:#90a4ae}
-.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;align-items:center;justify-content:center;flex-direction:column;gap:12px}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;align-items:center;justify-content:center;padding:16px}
 .modal.open{display:flex}
-.modal video,.modal img{max-width:94vw;max-height:82vh;border-radius:8px}
-.modal-close{position:fixed;top:16px;right:24px;font-size:2em;color:#fff;cursor:pointer}
-.modal-title{color:#ccc;font-size:.85em;max-width:94vw;text-align:center}
-.modal-dl{margin-top:4px;padding:7px 18px;border-radius:6px;background:#2196F3;color:#fff;font-size:.85em;font-weight:600}
+.modal-box{background:#1a2533;border-radius:12px;overflow:hidden;max-width:96vw;width:900px;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,.7)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#0f1923;gap:12px}
+.modal-title{color:#e0e0e0;font-size:.9em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.modal-close{background:none;border:none;color:#90a4ae;font-size:1.4em;cursor:pointer;padding:2px 6px;border-radius:4px;flex-shrink:0}
+.modal-close:hover{background:#263548;color:#fff}
+.modal-body{background:#000;display:flex;align-items:center;justify-content:center;min-height:200px}
+.modal-body video{width:100%;max-height:72vh;display:block;outline:none}
+.modal-body img{max-width:100%;max-height:72vh;display:block}
+.modal-footer{padding:10px 16px;display:flex;justify-content:flex-end;background:#0f1923}
 .empty{text-align:center;color:#546e7a;padding:48px;font-size:.95em}
 .cam-panel{display:none}.cam-panel.active{display:block}
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0f1923}::-webkit-scrollbar-thumb{background:#263548;border-radius:3px}
@@ -146,12 +172,22 @@ a{color:inherit;text-decoration:none}
 {% endif %}
 </div>
 
-<div class="modal" id="modal" onclick="closeModal(event)">
-  <span class="modal-close" onclick="closeModal()">&#x2715;</span>
-  <video id="modal-video" controls style="display:none"></video>
-  <img id="modal-img" style="display:none" alt="">
-  <div class="modal-title" id="modal-title"></div>
-  <a id="modal-dl" href="#" download class="modal-dl">&#x2B07; Baixar</a>
+<div class="modal" id="modal">
+  <div class="modal-box" id="modal-box">
+    <div class="modal-header">
+      <span id="modal-title" class="modal-title"></span>
+      <button class="modal-close" onclick="closeModal()" title="Fechar">&#x2715;</button>
+    </div>
+    <div class="modal-body">
+      <video id="modal-video" controls preload="metadata" style="display:none"
+             onerror="onVideoError(this)"></video>
+      <img id="modal-img" style="display:none" alt="">
+      <div id="modal-error" style="display:none;color:#ef5350;padding:24px;text-align:center;font-size:.9em"></div>
+    </div>
+    <div class="modal-footer">
+      <a id="modal-dl" href="#" download class="btn">&#x2B07; Baixar arquivo</a>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -167,28 +203,59 @@ function openModal(title,dlUrl){
   document.getElementById('modal').classList.add('open');
   document.getElementById('modal-title').textContent=title;
   document.getElementById('modal-dl').href=dlUrl;
+  document.getElementById('modal-dl').download=dlUrl.split('/').pop();
+  document.getElementById('modal-error').style.display='none';
+  document.body.style.overflow='hidden';
 }
-function closeModal(e){
-  if(e&&e.target!==document.getElementById('modal')&&!e.target.classList.contains('modal-close'))return;
+function closeModal(){
   const m=document.getElementById('modal');
+  if(!m.classList.contains('open'))return;
   m.classList.remove('open');
   const v=document.getElementById('modal-video');
-  v.pause();v.src='';v.style.display='none';
+  v.pause();v.removeAttribute('src');v.load();v.style.display='none';
   document.getElementById('modal-img').style.display='none';
+  document.body.style.overflow='';
 }
 function playVideo(src,title,dl){
   const v=document.getElementById('modal-video');
+  const err=document.getElementById('modal-error');
   document.getElementById('modal-img').style.display='none';
-  v.style.display='block';v.src=src;
-  openModal(title,dl);v.play();
+  err.style.display='none';
+  v.style.display='block';
+  v.removeAttribute('src');
+  v.load();
+  // Usa source element para melhor compatibilidade
+  v.innerHTML='';
+  const s=document.createElement('source');
+  s.src=src;
+  s.type='video/mp4';
+  v.appendChild(s);
+  v.load();
+  openModal(title,dl);
+  v.play().catch(function(e){
+    if(e.name!=='AbortError'){
+      err.textContent='Erro ao reproduzir: '+e.message+'. Use o botão Baixar para ver o vídeo.';
+      err.style.display='block';
+    }
+  });
+}
+function onVideoError(v){
+  const err=document.getElementById('modal-error');
+  err.textContent='Formato não suportado pelo navegador. Use o botão Baixar para ver o vídeo.';
+  err.style.display='block';
+  v.style.display='none';
 }
 function showImg(src,title,dl){
   const i=document.getElementById('modal-img');
-  document.getElementById('modal-video').style.display='none';
+  const v=document.getElementById('modal-video');
+  v.pause();v.removeAttribute('src');v.load();v.style.display='none';
   i.style.display='block';i.src=src;
   openModal(title,dl);
 }
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal({target:document.getElementById('modal')});});
+document.getElementById('modal').addEventListener('click',function(e){
+  if(e.target===this)closeModal();
+});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
 </script>
 </body>
 </html>"""
@@ -251,7 +318,104 @@ def serve_file(cam_id, filename):
     path     = os.path.join(RECORDINGS_DIR, cam_id, filename)
     if not os.path.isfile(path):
         abort(404)
+
+    if filename.lower().endswith(('.mp4', '.avi')):
+        # Verifica se já é H.264 (gravado pelo novo motion_recorder)
+        cached = _h264_cache_path(path)
+        if os.path.isfile(cached):
+            return _range_response(cached, 'video/mp4')
+        if FFMPEG:
+            return _transcode_stream(path)
+        return _range_response(path, 'video/mp4')
     return send_file(path)
+
+
+def _h264_cache_path(src_path: str) -> str:
+    """Caminho do arquivo H.264 em cache (mesmo nome, pasta recordings_h264/)."""
+    rel  = os.path.relpath(src_path, RECORDINGS_DIR)
+    return os.path.join(_APP_DIR, 'recordings_h264', rel)
+
+
+def _transcode_stream(path: str) -> Response:
+    """Transcodifica MPEG-4→H.264 via ffmpeg e envia como stream fragmentado.
+    Usa frag_keyframe+empty_moov para que o browser consiga tocar sem seek.
+    """
+    cached = _h264_cache_path(path)
+
+    def generate():
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        # Grava cache ao mesmo tempo que envia ao browser
+        cache_tmp = cached + '.tmp'
+        proc = subprocess.Popen(
+            [
+                FFMPEG, '-y', '-i', path,
+                '-vcodec', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', 'frag_keyframe+empty_moov',
+                '-an',  # sem áudio (câmeras RTSP geralmente não têm)
+                '-f', 'mp4', 'pipe:1',
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        buf = bytearray()
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                yield bytes(chunk)
+        finally:
+            proc.stdout.close()
+            proc.wait()
+            # Salva cache apenas se a transcodificação terminou com sucesso
+            if proc.returncode == 0 and buf:
+                try:
+                    with open(cache_tmp, 'wb') as f:
+                        f.write(buf)
+                    os.replace(cache_tmp, cached)
+                except Exception:
+                    pass
+
+    return Response(
+        generate(),
+        mimetype='video/mp4',
+        headers={'Cache-Control': 'no-cache', 'Accept-Ranges': 'none'},
+    )
+
+
+def _range_response(path: str, mime: str) -> Response:
+    """Serve arquivo com suporte a HTTP 206 Partial Content (Range Requests)."""
+    file_size = os.path.getsize(path)
+    range_header = request.headers.get('Range')
+
+    if not range_header:
+        with open(path, 'rb') as f:
+            data = f.read()
+        resp = Response(data, 200, mimetype=mime)
+        resp.headers['Accept-Ranges'] = 'bytes'
+        resp.headers['Content-Length'] = str(file_size)
+        return resp
+
+    # Parseia "bytes=start-end"
+    m = re.match(r'bytes=(\d+)-(\d*)', range_header)
+    if not m:
+        abort(416)
+    start = int(m.group(1))
+    end   = int(m.group(2)) if m.group(2) else file_size - 1
+    end   = min(end, file_size - 1)
+    length = end - start + 1
+
+    with open(path, 'rb') as f:
+        f.seek(start)
+        data = f.read(length)
+
+    resp = Response(data, 206, mimetype=mime)
+    resp.headers['Content-Range']  = f'bytes {start}-{end}/{file_size}'
+    resp.headers['Accept-Ranges']  = 'bytes'
+    resp.headers['Content-Length'] = str(length)
+    return resp
 
 
 # ── Tunnel + registro DVR ──────────────────────────────────────
