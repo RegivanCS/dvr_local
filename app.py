@@ -4,6 +4,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 import json
 import os
+import shutil
 import logging
 import time
 import secrets
@@ -111,6 +112,78 @@ def save_config(config):
     """Salva configuração das câmeras"""
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+def get_storage_settings(config=None):
+    """Retorna configuração de retenção cíclica das gravações."""
+    if config is None:
+        config = load_config()
+    s = config.get('storage', {})
+    try:
+        max_gb = float(s.get('max_gb', 20))
+    except Exception:
+        max_gb = 20.0
+    try:
+        reserve_free_gb = float(s.get('reserve_free_gb', 2))
+    except Exception:
+        reserve_free_gb = 2.0
+    return {
+        'cyclic_enabled': bool(s.get('cyclic_enabled', True)),
+        'max_gb': max(0.5, max_gb),
+        'reserve_free_gb': max(0.0, reserve_free_gb),
+    }
+
+def _iter_recording_files():
+    for root, _, files in os.walk(RECORDINGS_DIR):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            yield {
+                'path': path,
+                'size': st.st_size,
+                'mtime': st.st_mtime,
+            }
+
+def enforce_recordings_limits(config=None, reason=''):
+    """Apaga os arquivos mais antigos quando ultrapassa limites de retenção."""
+    settings = get_storage_settings(config)
+    if not settings['cyclic_enabled']:
+        return {'deleted': 0, 'freed_bytes': 0, 'total_bytes': 0}
+
+    files = sorted(_iter_recording_files(), key=lambda x: x['mtime'])
+    total_bytes = sum(f['size'] for f in files)
+
+    max_bytes = max(0, int(settings['max_gb'] * 1024 * 1024 * 1024))
+    need_reduce_by_max = max(0, total_bytes - max_bytes) if max_bytes > 0 else 0
+
+    usage = shutil.disk_usage(RECORDINGS_DIR)
+    reserve_bytes = max(0, int(settings['reserve_free_gb'] * 1024 * 1024 * 1024))
+    need_reduce_by_free = max(0, reserve_bytes - usage.free)
+
+    need_remove = max(need_reduce_by_max, need_reduce_by_free)
+    if need_remove <= 0:
+        return {'deleted': 0, 'freed_bytes': 0, 'total_bytes': total_bytes}
+
+    deleted, freed = 0, 0
+    for item in files:
+        try:
+            os.remove(item['path'])
+            deleted += 1
+            freed += item['size']
+            if freed >= need_remove:
+                break
+        except OSError:
+            continue
+
+    if deleted:
+        logger.warning(
+            f"Retenção cíclica: removidos {deleted} arquivo(s), liberado {freed/1024/1024:.1f} MB"
+            + (f" [{reason}]" if reason else "")
+        )
+
+    return {'deleted': deleted, 'freed_bytes': freed, 'total_bytes': total_bytes}
 
 def get_credentials():
     """Retorna (user, password) definidos na config ou variáveis de ambiente"""
@@ -321,6 +394,35 @@ def set_auth():
     save_config(config)
     return jsonify({'success': True})
 
+@app.route('/api/storage/settings', methods=['GET', 'POST'])
+@login_required
+def storage_settings_api():
+    config = load_config()
+    if request.method == 'GET':
+        return jsonify({'success': True, 'storage': get_storage_settings(config)})
+
+    data = request.get_json(silent=True) or request.form
+    try:
+        cyclic_enabled = str(data.get('cyclic_enabled', 'true')).lower() in ('1', 'true', 'yes', 'on')
+        max_gb = float(data.get('max_gb', 20))
+        reserve_free_gb = float(data.get('reserve_free_gb', 2))
+    except Exception:
+        return jsonify({'success': False, 'error': 'Parâmetros inválidos'}), 400
+
+    if max_gb < 0.5 or max_gb > 5000:
+        return jsonify({'success': False, 'error': 'Limite (GB) fora da faixa permitida (0.5 - 5000)'}), 400
+    if reserve_free_gb < 0 or reserve_free_gb > 1000:
+        return jsonify({'success': False, 'error': 'Reserva livre (GB) fora da faixa permitida (0 - 1000)'}), 400
+
+    config['storage'] = {
+        'cyclic_enabled': cyclic_enabled,
+        'max_gb': max_gb,
+        'reserve_free_gb': reserve_free_gb,
+    }
+    save_config(config)
+    sweep = enforce_recordings_limits(config=config, reason='settings_update')
+    return jsonify({'success': True, 'storage': config['storage'], 'sweep': sweep})
+
 # ---------- Fim das rotas de autenticação ----------
 
 def _rtsp_snapshot(ip: str, port: int, user: str, password: str):
@@ -520,10 +622,12 @@ def config_page():
     """Página de configuração"""
     config = load_config()
     cameras = config.get('cameras', {})
+    storage = get_storage_settings(config)
     
     return render_template_string(CONFIG_TEMPLATE, 
                                    cameras=cameras, 
-                                   models=CAMERA_MODELS)
+                                   models=CAMERA_MODELS,
+                                   storage=storage)
 
 @app.route('/api/camera/add', methods=['POST'])
 @login_required
@@ -965,6 +1069,7 @@ def _motion_worker(cam_id: str, stop_event: threading.Event):
                 snap_path = os.path.join(cam_dir, f'motion_{ts_str}.jpg')
                 with open(snap_path, 'wb') as f:
                     f.write(curr_frame)
+                enforce_recordings_limits(reason='motion_snapshot')
 
                 count = _motion_status[cam_id]['count'] + 1
                 _motion_status[cam_id].update({
@@ -1016,6 +1121,7 @@ def _save_video_burst(cam_id: str, frames: list):
                 out.write(img)
         out.release()
         logger.info(f"Vídeo salvo: {video_path}")
+        enforce_recordings_limits(reason='video_burst')
     except ImportError:
         # cv2 não disponível: salvar frames individuais
         for i, frame_data in enumerate(frames):
@@ -1023,6 +1129,7 @@ def _save_video_burst(cam_id: str, frames: list):
             with open(frame_path, 'wb') as f:
                 f.write(frame_data)
         logger.info(f"Frames de vídeo salvos em {cam_dir} (cv2 indisponível)")
+        enforce_recordings_limits(reason='video_frames_fallback')
 
 def _is_motion_active(cam_id: str) -> bool:
     t = _motion_threads.get(cam_id)
@@ -1143,6 +1250,7 @@ def take_snapshot(cam_id):
             path = os.path.join(cam_dir, f'snap_{ts_str}.jpg')
             with open(path, 'wb') as f:
                 f.write(r.content)
+            enforce_recordings_limits(reason='manual_snapshot')
             return jsonify({'success': True, 'file': f'snap_{ts_str}.jpg'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1251,12 +1359,12 @@ a{color:inherit;text-decoration:none}
 .hour-block{margin-bottom:18px}
 .hour-pin{position:absolute;left:8px;width:26px;height:26px;border-radius:50%;background:#263548;border:2px solid #37474f;display:flex;align-items:center;justify-content:center;font-size:.65em;color:#90a4ae;font-weight:700;margin-top:3px}
 .hour-label{font-size:.75em;color:#546e7a;margin-bottom:8px;padding-left:4px}
-.clips-row{display:flex;flex-wrap:wrap;gap:10px}
+.clips-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}
 
 /* CLIP CARD */
-.clip{width:180px;border-radius:8px;overflow:hidden;background:#1a2533;border:1px solid #263548;cursor:pointer;transition:transform .15s,border-color .15s}
+.clip{width:100%;border-radius:8px;overflow:hidden;background:#1a2533;border:1px solid #263548;cursor:pointer;transition:transform .15s,border-color .15s}
 .clip:hover{transform:translateY(-3px);border-color:#2196F3}
-.clip-thumb{width:180px;height:105px;background:#0d1520;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+.clip-thumb{width:100%;aspect-ratio:16/9;background:#0d1520;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
 .clip-thumb img{width:100%;height:100%;object-fit:cover}
 .clip-play{position:absolute;width:44px;height:44px;border-radius:50%;background:rgba(33,150,243,.85);display:flex;align-items:center;justify-content:center;font-size:1.2em}
 .clip-info{padding:8px 10px}
@@ -1266,9 +1374,9 @@ a{color:inherit;text-decoration:none}
 .clip-dl:hover{background:#2196F3;color:#fff}
 
 /* SNAP CARD */
-.snap{width:140px;border-radius:8px;overflow:hidden;background:#1a2533;border:1px solid #263548;cursor:pointer;transition:transform .15s,border-color .15s}
+.snap{width:100%;border-radius:8px;overflow:hidden;background:#1a2533;border:1px solid #263548;cursor:pointer;transition:transform .15s,border-color .15s}
 .snap:hover{transform:translateY(-3px);border-color:#4caf50}
-.snap-thumb{width:140px;height:84px;object-fit:cover;display:block}
+.snap-thumb{width:100%;aspect-ratio:5/3;object-fit:cover;display:block}
 .snap-info{padding:6px 8px}
 .snap-time{font-size:.75em;color:#90a4ae}
 
@@ -1282,6 +1390,21 @@ a{color:inherit;text-decoration:none}
 
 .empty{text-align:center;color:#546e7a;padding:48px;font-size:.95em}
 .cam-panel{display:none}.cam-panel.active{display:block}
+
+@media (max-width: 900px){
+    .timeline{padding-left:30px}
+    .timeline::before{left:10px}
+    .hour-pin{left:-2px;width:22px;height:22px;font-size:.6em}
+    .clips-row{grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:8px}
+}
+@media (max-width: 600px){
+    .topbar{padding:10px 12px}
+    .wrap{padding:12px 8px}
+    .topbar-nav{width:100%;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+    .btn{width:100%;text-align:center;padding:8px 6px;font-size:.78em}
+    .clips-row{grid-template-columns:1fr 1fr}
+    .modal video,.modal img{max-width:98vw;max-height:88vh}
+}
 
 /* scrollbar */
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0f1923}::-webkit-scrollbar-thumb{background:#263548;border-radius:3px}
@@ -1462,7 +1585,7 @@ INDEX_TEMPLATE = """
         .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
         .cameras {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
             gap: 25px;
             max-width: 1800px;
             margin: 30px auto;
@@ -1484,10 +1607,11 @@ INDEX_TEMPLATE = """
         .camera-box h3 { margin-bottom: 10px; font-size: 1.3em; }
         .camera-box img {
             width: 100%;
-            min-height: 300px;
+            aspect-ratio: 16 / 9;
             border-radius: 8px;
             background: #000;
             border: 2px solid rgba(255, 255, 255, 0.1);
+            object-fit: cover;
         }
         .status {
             margin-top: 10px;
@@ -1527,16 +1651,22 @@ INDEX_TEMPLATE = """
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: 20px;
+            padding: 10px;
         }
         .fullscreen-content img {
-            max-width: 100%;
-            max-height: 100%;
+            width: 100%;
+            height: 100%;
             object-fit: contain;
         }
         @media (max-width: 768px) {
-            .cameras { grid-template-columns: 1fr; }
+            .cameras { grid-template-columns: 1fr; gap: 14px; margin: 16px auto; padding: 0 10px; }
             .header { flex-direction: column; gap: 15px; text-align: center; }
+            .header-buttons { justify-content: center; flex-wrap: wrap; }
+            .btn { width: 100%; max-width: 320px; text-align: center; }
+            .camera-box { padding: 12px; }
+            .fullscreen-header { padding: 10px 12px; }
+            .fullscreen-title { font-size: 1.05em; }
+            .fullscreen-close { padding: 8px 14px; font-size: .9em; }
         }
     </style>
 </head>
@@ -1770,6 +1900,13 @@ CONFIG_TEMPLATE = """
             gap: 10px;
             flex-wrap: wrap;
         }
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .header { flex-direction: column; gap: 12px; text-align: center; }
+            .camera-item { flex-direction: column; align-items: flex-start; gap: 10px; }
+            .camera-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+            .camera-actions .btn { width: 100%; text-align: center; }
+        }
     </style>
 </head>
 <body>
@@ -1847,6 +1984,28 @@ CONFIG_TEMPLATE = """
             {% else %}
                 <p style="text-align: center; opacity: 0.7;">Nenhuma câmera configurada ainda.</p>
             {% endif %}
+        </div>
+
+        <div class="form-container" style="margin-top: 30px;">
+            <h2>💾 Armazenamento e Gravação Cíclica</h2>
+            <p style="opacity:.85; margin:10px 0 18px 0;">
+                Quando ativado, o sistema remove automaticamente os arquivos mais antigos
+                ao atingir o limite definido ou quando o espaço livre ficar abaixo da reserva.
+            </p>
+            <div class="form-group" style="display:flex; align-items:center; gap:10px;">
+                <input type="checkbox" id="stCyclic" style="width:auto; transform:scale(1.25);"
+                       {% if storage.cyclic_enabled %}checked{% endif %}>
+                <label for="stCyclic" style="margin:0;">Ativar gravação cíclica automática</label>
+            </div>
+            <div class="form-group">
+                <label>Limite total para pasta de gravações (GB)</label>
+                <input type="number" id="stMaxGb" min="0.5" max="5000" step="0.5" value="{{ storage.max_gb }}">
+            </div>
+            <div class="form-group">
+                <label>Reserva mínima de espaço livre no disco (GB)</label>
+                <input type="number" id="stReserveGb" min="0" max="1000" step="0.5" value="{{ storage.reserve_free_gb }}">
+            </div>
+            <button onclick="saveStorageSettings()" class="btn btn-primary">💾 Salvar Política de Armazenamento</button>
         </div>
 
         <div class="form-container" style="margin-top: 30px;">
@@ -2020,6 +2179,36 @@ CONFIG_TEMPLATE = """
                     }
                 }).catch(()=>{});
         });
+
+        async function saveStorageSettings() {
+            const cyclic_enabled = document.getElementById('stCyclic').checked;
+            const max_gb = parseFloat(document.getElementById('stMaxGb').value || '0');
+            const reserve_free_gb = parseFloat(document.getElementById('stReserveGb').value || '0');
+
+            if (isNaN(max_gb) || max_gb < 0.5) {
+                return alert('Defina um limite válido (mínimo 0.5 GB).');
+            }
+            if (isNaN(reserve_free_gb) || reserve_free_gb < 0) {
+                return alert('Defina uma reserva livre válida (mínimo 0 GB).');
+            }
+
+            try {
+                const res = await fetch('/api/storage/settings', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ cyclic_enabled, max_gb, reserve_free_gb })
+                });
+                const parsed = await parseJsonSafe(res);
+                const data = ensureJsonResponse(parsed);
+                if (!data.success) {
+                    return alert('Erro: ' + (data.error || 'falha ao salvar'));
+                }
+                const mb = ((data.sweep && data.sweep.freed_bytes) ? data.sweep.freed_bytes : 0) / 1024 / 1024;
+                alert('✓ Política de armazenamento salva.' + (mb > 0 ? `\nLimpeza aplicada: ${mb.toFixed(1)} MB liberados.` : ''));
+            } catch (e) {
+                alert('Erro ao salvar política de armazenamento: ' + e.message);
+            }
+        }
 
         async function changePassword() {
             const user = document.getElementById('authUser').value.trim();
