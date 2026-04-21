@@ -29,3 +29,9 @@ Thumbs.db
 test_*.py
 .dvr_secret
 cameras_config.json
+agent_config.json
+recordings/
+cloudflared.exe
+cloudflared.EXE
+*.jpg
+*.mp4

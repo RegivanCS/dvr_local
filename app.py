@@ -1,6 +1,7 @@
 from flask import Flask, Response, render_template_string, request, redirect, url_for, jsonify, session, send_file
 from functools import wraps
 import requests
+from requests.auth import HTTPDigestAuth
 import json
 import os
 import logging
@@ -85,7 +86,15 @@ CAMERA_MODELS = {
     'generic': {
         'name': 'Genérico (tentar todos)',
         'paths': ['/snapshot.cgi', '/image.jpg', '/snap.jpg', '/tmpfs/auto.jpg', '/cgi-bin/snapshot.cgi', '/jpg/image.jpg']
-    }
+    },
+    'longse': {
+        'name': 'Longse / LAPI (LongVision)',
+        'paths': [
+            '/LAPI/V1.0/Channel/0/Media/Video/ShotFrame',
+            '/LAPI/V1.0/Channel/0/Media/JPEG/ShotFrame',
+            '/LAPI/V1.0/Channel/0/Media/MainStream/ShotFrame',
+        ]
+    },
 }
 
 def load_config():
@@ -252,6 +261,54 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
+@app.route('/api/set-recordings-url', methods=['POST'])
+def set_recordings_url():
+    """Salva URL pública do servidor local de gravações (chamado pelo agent.py).
+    Autenticado por token derivado da senha, sem dependência de sessão."""
+    import hashlib
+    config = load_config()
+    password = config.get('auth', {}).get('password', '')
+    expected = hashlib.sha256(f'dvr-clear:{password}'.encode()).hexdigest()
+    token = request.form.get('token')
+    if not token or token != expected:
+        return jsonify({'success': False, 'error': 'Token inválido'}), 403
+    url = request.form.get('url', '').strip()
+    if url:
+        config['recordings_tunnel_url'] = url
+    else:
+        config.pop('recordings_tunnel_url', None)
+    save_config(config)
+    logger.info(f'recordings_tunnel_url atualizado: {url!r}')
+    return jsonify({'success': True, 'url': url})
+
+
+@app.route('/api/cameras/clear', methods=['POST'])
+def clear_all_cameras_api():
+    """Limpa TODAS as câmeras — autenticado por token derivado da senha (não depende de sessão).
+    Usado pelo agent.py para evitar duplicatas em ambientes multi-worker (Phusion Passenger)."""
+    import hashlib
+    config = load_config()
+    password = config.get('auth', {}).get('password', '')
+    expected = hashlib.sha256(f'dvr-clear:{password}'.encode()).hexdigest()
+    token = request.form.get('token') or request.json.get('token') if request.is_json else request.form.get('token')
+    if not token or token != expected:
+        return jsonify({'success': False, 'error': 'Token inválido'}), 403
+    count = len(config.get('cameras', {}))
+    config['cameras'] = {}
+    save_config(config)
+    logger.info(f'Todas as câmeras removidas via clear API ({count} câmeras)')
+    return jsonify({'success': True, 'removed': count})
+
+
+@app.route('/dvr-reset-senha-emergencia')
+def emergency_reset():
+    """Rota temporária de emergência — redefine senha para admin/!Rede!123.
+    REMOVER após uso."""
+    config = load_config()
+    config['auth'] = {'user': 'admin', 'password': '!Rede!123'}
+    save_config(config)
+    return '<h2>✅ Senha redefinida!</h2><p>Usuário: <b>admin</b> / Senha: <b>!Rede!123</b></p><a href="/login">→ Fazer login</a>'
+
 @app.route('/api/auth/set', methods=['POST'])
 @login_required
 def set_auth():
@@ -266,19 +323,79 @@ def set_auth():
 
 # ---------- Fim das rotas de autenticação ----------
 
-def test_camera_connection(ip, port, user, password, model):
-    """Testa conexão com câmera e retorna path funcional"""
-    paths = CAMERA_MODELS.get(model, {}).get('paths', [])
-    
-    for path in paths:
-        url = f"http://{ip}:{port}{path}"
+def _rtsp_snapshot(ip: str, port: int, user: str, password: str):
+    """Captura um frame JPEG via RTSP usando OpenCV.
+    Retorna bytes JPEG ou None se não disponível."""
+    try:
+        import cv2, io
+        import numpy as np
+        creds = f'{user}:{password}@' if user else ''
+        rtsp_url = f'rtsp://{creds}{ip}:{port}/stream'
+        # Tentar varião de paths RTSP
+        for rtsp_path in ['/stream', '/h264/ch1/main/av_stream', '/live/ch0/main', '/channel=1', '']:
+            url = f'rtsp://{creds}{ip}:{port}{rtsp_path}'
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 4000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 4000)
+            ret, frame = cap.read()
+            cap.release()
+            if ret and frame is not None:
+                ok, buf = cv2.imencode('.jpg', frame)
+                if ok:
+                    return bytes(buf)
+    except Exception:
+        pass
+    return None
+
+
+def _camera_fetch(url: str, user: str, password: str, timeout: int = 5):
+    """Faz GET na câmera tentando Basic Auth e depois Digest Auth automaticamente."""
+    auth_basic  = (user, password) if user else None
+    auth_digest = HTTPDigestAuth(user, password) if user else None
+    for auth in [auth_basic, auth_digest]:
         try:
-            response = requests.get(url, auth=(user, password), timeout=3, headers=HTTP_HEADERS)
-            if response.status_code == 200 and len(response.content) > 100:
-                return {'success': True, 'path': path, 'url': url}
-        except:
-            continue
-    
+            r = requests.get(url, auth=auth, timeout=timeout, headers=HTTP_HEADERS)
+            if r.status_code == 200:
+                return r
+        except Exception:
+            pass
+    return None
+
+
+def _camera_auth(url: str, user: str, password: str):
+    """Retorna o objeto auth que funciona (Basic ou Digest), ou None."""
+    if not user:
+        return None
+    for auth in [(user, password), HTTPDigestAuth(user, password)]:
+        try:
+            r = requests.get(url, auth=auth, timeout=3, headers=HTTP_HEADERS)
+            if r.status_code == 200:
+                return auth
+        except Exception:
+            pass
+    return None
+
+
+def test_camera_connection(ip, port, user, password, model):
+    """Testa conexão com câmera e retorna path funcional.
+    Suporta Basic Auth e Digest Auth automaticamente."""
+    all_paths = CAMERA_MODELS.get(model, {}).get('paths', [])
+    # Para genérico, também tentar LAPI
+    if model in ('generic', 'iscee'):
+        all_paths = all_paths + CAMERA_MODELS['longse']['paths']
+
+    for path in all_paths:
+        url = f'http://{ip}:{port}{path}'
+        r = _camera_fetch(url, user, password, timeout=3)
+        if r is not None and len(r.content) > 100 and r.content[:2] == b'\xff\xd8':
+            return {'success': True, 'path': path, 'url': url}
+
+    # Fallback: tentar RTSP (câmeras que só entregam via RTSP)
+    rtsp_port = 554
+    snap = _rtsp_snapshot(ip, rtsp_port, user, password)
+    if snap:
+        return {'success': True, 'path': 'rtsp://', 'url': f'rtsp://{ip}:{rtsp_port}'}
+
     return {'success': False, 'error': 'Nenhum path funcional encontrado'}
 
 def gen_frames_from_camera(cam_id):
@@ -296,10 +413,43 @@ def gen_frames_from_camera(cam_id):
     user = cam.get('user', '')
     password = cam.get('password', '')
 
-    snapshot_url = f"http://{ip}:{port}{path}"
-    auth = (user, password) if user else None
+    # Câmera RTSP-only (path salvo como 'rtsp://')
+    if path == 'rtsp://':
+        logger.info(f'Câmera {cam_id}: modo RTSP')
+        try:
+            import cv2
+            creds = f'{user}:{password}@' if user else ''
+            rtsp_url = f'rtsp://{creds}{ip}:554'
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            frame_count = 0
+            error_count = 0
+            while True:
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    ok, buf = cv2.imencode('.jpg', frame)
+                    if ok:
+                        frame_count += 1
+                        error_count = 0
+                        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+                               + bytes(buf) + b'\r\n')
+                        time.sleep(0.1)
+                        continue
+                error_count += 1
+                if error_count > 20:
+                    logger.error(f'Câmera {cam_id}: RTSP sem resposta')
+                    cap.release()
+                    break
+                time.sleep(0.5)
+        except ImportError:
+            logger.error(f'Câmera {cam_id}: OpenCV não instalado — necessário para câmeras RTSP-only')
+        return
 
-    logger.info(f"Conectando câmera {cam_id}: {snapshot_url}")
+    scheme = 'https' if str(port) == '443' else 'http'
+    snapshot_url = f'{scheme}://{ip}:{port}{path}'
+    # Detecta o tipo de auth correto (Basic ou Digest) na primeira conexão
+    auth = _camera_auth(snapshot_url, user, password)
+
+    logger.info(f'Conectando câmera {cam_id}: {snapshot_url}')
 
     frame_count = 0
     error_count = 0
@@ -384,16 +534,23 @@ def add_camera():
     config = load_config()
     cam_id = str(int(time.time() * 1000))  # ID único baseado em timestamp
     
-    # Testar conexão
-    result = test_camera_connection(
-        data['ip'], data['port'], 
-        data['user'], data['password'], 
-        data['model']
-    )
-    
-    if not result['success']:
-        return jsonify({'success': False, 'error': result.get('error')}), 400
-    
+    skip_test = request.form.get('skip_test', 'false').lower() == 'true'
+
+    if skip_test:
+        path = data.get('path', '/snapshot.cgi')
+    else:
+        # Testar conexão
+        result = test_camera_connection(
+            data['ip'], data['port'],
+            data['user'], data['password'],
+            data['model']
+        )
+        if not result['success']:
+            return jsonify({'success': False, 'error': result.get('error')}), 400
+        path = result['path']
+
+    _scheme = 'https' if str(data['port']) == '443' else 'http'
+    _snap_url = f"{_scheme}://{data['ip']}:{data['port']}{path}"
     config['cameras'][cam_id] = {
         'name': data['name'],
         'ip': data['ip'],
@@ -401,7 +558,8 @@ def add_camera():
         'user': data['user'],
         'password': data['password'],
         'model': data['model'],
-        'path': result['path'],
+        'path': path,
+        'snapshot_url': _snap_url,
         'enabled': True,
         'created_at': datetime.now().isoformat()
     }
@@ -421,16 +579,24 @@ def edit_camera(cam_id):
     if cam_id not in config['cameras']:
         return jsonify({'success': False, 'error': 'Câmera não encontrada'}), 404
     
-    # Testar conexão com novos dados
-    result = test_camera_connection(
-        data['ip'], data['port'], 
-        data['user'], data['password'], 
-        data['model']
-    )
-    
-    if not result['success']:
-        return jsonify({'success': False, 'error': result.get('error')}), 400
-    
+    skip_test = request.form.get('skip_test', 'false').lower() == 'true'
+
+    if skip_test:
+        path = data.get('path', '/snapshot.jpg')
+    else:
+        # Testar conexão com novos dados
+        result = test_camera_connection(
+            data['ip'], data['port'],
+            data['user'], data['password'],
+            data['model']
+        )
+        if not result['success']:
+            return jsonify({'success': False, 'error': result.get('error')}), 400
+        path = result['path']
+
+    _scheme = 'https' if str(data['port']) == '443' else 'http'
+    _snap_url = f"{_scheme}://{data['ip']}:{data['port']}{path}"
+
     # Atualizar câmera
     config['cameras'][cam_id].update({
         'name': data['name'],
@@ -439,7 +605,8 @@ def edit_camera(cam_id):
         'user': data['user'],
         'password': data['password'],
         'model': data['model'],
-        'path': result['path'],
+        'path': path,
+        'snapshot_url': _snap_url,
         'updated_at': datetime.now().isoformat()
     })
     
@@ -573,7 +740,8 @@ def scan_network():
 # ──────────────────────────────────────────────────────────────
 # AGENT — endpoints para o agente local (agent.py)
 # ──────────────────────────────────────────────────────────────
-_agent_state = {}   # agent_name -> {'last_seen': float, 'command': str|None}
+_agent_state = {}       # agent_name -> {'last_seen': float, 'command': str|None}
+_snapshot_cache = {}    # cam_id -> bytes (último snapshot recebido do agente)
 
 @app.route('/api/agent/heartbeat', methods=['POST'])
 @login_required
@@ -625,16 +793,26 @@ def agent_list():
 def agent_results():
     """Recebe resultados do scan do agente e cadastra câmeras"""
     data = request.get_json() or {}
-    cameras = data.get('cameras', [])
+    cameras   = data.get('cameras', [])
     cam_user  = data.get('cam_user', 'admin')
     cam_pass  = data.get('cam_password', '')
     cam_model = data.get('cam_model', 'generic')
+    # O agente já verificou as câmeras localmente — não testar novamente do servidor
+    skip_test = data.get('skip_test', False)
 
     config = load_config()
     registered = 0
+    cam_ids = []
     for cam in cameras:
-        result = test_camera_connection(cam['ip'], cam['port'], cam_user, cam_pass, cam_model)
-        if result['success']:
+        if skip_test:
+            path = cam.get('path', '/snapshot.cgi')
+            success = True
+        else:
+            result  = test_camera_connection(cam['ip'], cam['port'], cam_user, cam_pass, cam_model)
+            success = result['success']
+            path    = result.get('path', '/snapshot.cgi') if success else '/snapshot.cgi'
+
+        if success:
             cam_id = str(int(time.time() * 1000) + registered)
             config['cameras'][cam_id] = {
                 'name': f'Câmera ({cam["ip"]})',
@@ -643,10 +821,11 @@ def agent_results():
                 'user': cam_user,
                 'password': cam_pass,
                 'model': cam_model,
-                'path': result['path'],
+                'path': path,
                 'enabled': True,
                 'created_at': datetime.now().isoformat(),
             }
+            cam_ids.append(cam_id)
             registered += 1
             time.sleep(0.001)  # garante IDs únicos
 
@@ -654,7 +833,64 @@ def agent_results():
         save_config(config)
         logger.info(f"Agente cadastrou {registered} câmera(s)")
 
-    return jsonify({'registered': registered, 'found': len(cameras)})
+    return jsonify({'registered': registered, 'found': len(cameras), 'cam_ids': cam_ids})
+
+
+SNAPSHOTS_DIR = os.path.join(_APP_DIR, 'snapshots')
+os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
+
+@app.route('/api/agent/push_snapshot/<cam_id>', methods=['POST'])
+def agent_push_snapshot(cam_id):
+    """Recebe snapshot (JPEG bytes) enviado pelo agente local e salva em disco."""
+    # Aceita token (multi-worker safe) ou sessão normal
+    token = request.args.get('token') or request.headers.get('X-Agent-Token', '')
+    config = load_config()
+    expected = hashlib.sha256(f"dvr-clear:{config.get('password','')}".encode()).hexdigest()
+    if token != expected and not session.get('logged_in'):
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+    data = request.get_data()
+    if not data:
+        return jsonify({'success': False, 'error': 'Sem dados'}), 400
+    _snapshot_cache[cam_id] = data  # cache em memória (mesmo worker)
+    # Salva em disco para compartilhar entre workers Passenger
+    snap_file = os.path.join(SNAPSHOTS_DIR, f'{cam_id}.jpg')
+    try:
+        with open(snap_file, 'wb') as f:
+            f.write(data)
+    except Exception:
+        pass
+    return jsonify({'success': True})
+
+
+@app.route('/api/camera/<cam_id>/snapshot_img')
+@login_required
+def snapshot_img(cam_id):
+    """Serve o snapshot mais recente (do disco ou cache em memória)."""
+    # 1º tenta arquivo em disco (compartilhado entre workers)
+    snap_file = os.path.join(SNAPSHOTS_DIR, f'{cam_id}.jpg')
+    if os.path.exists(snap_file):
+        return send_file(snap_file, mimetype='image/jpeg',
+                         max_age=0, conditional=False)
+    # 2º tenta cache em memória (mesmo worker)
+    cached = _snapshot_cache.get(cam_id)
+    if cached:
+        return Response(cached, mimetype='image/jpeg',
+                        headers={'Cache-Control': 'no-store'})
+    # Fallback: tenta buscar diretamente na câmera
+    config = load_config()
+    cam = config.get('cameras', {}).get(cam_id)
+    if not cam:
+        return ('Câmera não encontrada', 404)
+    _s = 'https' if str(cam.get('port', 80)) == '443' else 'http'
+    url = cam.get('snapshot_url') or f"{_s}://{cam['ip']}:{cam['port']}{cam.get('path','/snapshot.cgi')}"
+    try:
+        r = _camera_fetch(url, cam.get('user',''), cam.get('password',''), timeout=5)
+        if r is not None and len(r.content) > 500:
+            return Response(r.content, mimetype='image/jpeg',
+                            headers={'Cache-Control': 'no-store'})
+    except Exception:
+        pass
+    return ('Snapshot indisponível', 503)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -689,8 +925,17 @@ def _motion_worker(cam_id: str, stop_event: threading.Event):
     path     = cam.get('path', '/snapshot.cgi')
     user     = cam.get('user', '')
     password = cam.get('password', '')
-    url      = f"http://{ip}:{port}{path}"
-    auth     = (user, password) if user else None
+
+    # Se a câmera está acessível via proxy RTSP local (porta 8191/8192),
+    # usa o snapshot do proxy em vez da URL remota (que seria o tunnel Cloudflare)
+    _proxy_ports = {8191: 8191, 8192: 8192}
+    if port in _proxy_ports:
+        url  = f"http://127.0.0.1:{port}/snapshot.jpg"
+        auth = None
+    else:
+        scheme = 'https' if port == 443 else 'http'
+        url    = f"{scheme}://{ip}:{port}{path}"
+        auth   = (user, password) if user else None
 
     cam_dir = os.path.join(RECORDINGS_DIR, cam_id)
     os.makedirs(cam_dir, exist_ok=True)
@@ -822,10 +1067,9 @@ def take_snapshot(cam_id):
     if not cam:
         return jsonify({'success': False, 'error': 'Câmera não encontrada'}), 404
     url  = f"http://{cam['ip']}:{cam['port']}{cam['path']}"
-    auth = (cam['user'], cam['password']) if cam.get('user') else None
     try:
-        r = requests.get(url, auth=auth, timeout=5, headers=HTTP_HEADERS)
-        if r.status_code == 200 and len(r.content) > 1000:
+        r = _camera_fetch(url, cam.get('user',''), cam.get('password',''), timeout=5)
+        if r is not None and len(r.content) > 1000:
             cam_dir = os.path.join(RECORDINGS_DIR, cam_id)
             os.makedirs(cam_dir, exist_ok=True)
             ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -837,18 +1081,54 @@ def take_snapshot(cam_id):
         return jsonify({'success': False, 'error': str(e)}), 500
     return jsonify({'success': False, 'error': 'Sem resposta da câmera'}), 502
 
+def _parse_recording(fname):
+    """Extrai datetime de nomes como motion_20260420_142055.mp4 ou snap_20260420_142055.jpg"""
+    import re as _re
+    m = _re.search(r'(\d{8})_(\d{6})', fname)
+    if m:
+        try:
+            return datetime.strptime(m.group(1) + m.group(2), '%Y%m%d%H%M%S')
+        except Exception:
+            pass
+    return None
+
+
 @app.route('/recordings')
 @login_required
 def recordings_page():
-    """Página de gravações e snapshots"""
+    """Página de gravações e snapshots — linha do tempo"""
     config = load_config()
+    tunnel_url = config.get('recordings_tunnel_url', '').strip()
+    if tunnel_url:
+        return redirect(tunnel_url)
     cameras = config.get('cameras', {})
     files_by_cam = {}
     for cam_id, cam_info in cameras.items():
         cam_dir = os.path.join(RECORDINGS_DIR, cam_id)
-        if os.path.isdir(cam_dir):
-            files = sorted(os.listdir(cam_dir), reverse=True)[:50]
-            files_by_cam[cam_id] = {'name': cam_info['name'], 'files': files}
+        if not os.path.isdir(cam_dir):
+            continue
+        raw = sorted(os.listdir(cam_dir), reverse=True)[:200]
+        by_date = {}
+        for fname in raw:
+            fp = os.path.join(cam_dir, fname)
+            dt = _parse_recording(fname)
+            date_str = dt.strftime('%d/%m/%Y') if dt else 'Data desconhecida'
+            hour     = f'{dt.hour:02d}' if dt else '??'
+            label    = dt.strftime('%H:%M:%S') if dt else fname
+            size_b   = os.path.getsize(fp) if os.path.isfile(fp) else 0
+            size_s   = f'{size_b/1024/1024:.1f} MB' if size_b > 1024*1024 else f'{size_b//1024} KB'
+            is_video = fname.lower().endswith(('.mp4', '.avi'))
+            item = {'fname': fname, 'label': label, 'size': size_s, 'is_video': is_video}
+            by_date.setdefault(date_str, {}).setdefault(hour, []).append(item)
+        # ordenar horas desc dentro de cada data
+        for d in by_date:
+            by_date[d] = dict(sorted(by_date[d].items(), reverse=True))
+        files_by_cam[cam_id] = {
+            'name': cam_info['name'],
+            'files': raw,
+            'by_date': dict(sorted(by_date.items(),
+                                   key=lambda x: x[0][::-1], reverse=True)),
+        }
     return render_template_string(RECORDINGS_TEMPLATE, files_by_cam=files_by_cam)
 
 @app.route('/recordings/<cam_id>/<filename>')
@@ -865,91 +1145,210 @@ def serve_recording(cam_id, filename):
 
 RECORDINGS_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="pt-br">
 <head>
-    <title>Gravações - DVR Local</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Segoe UI', Arial; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; color: white; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header { background: rgba(0,0,0,0.3); padding: 20px; border-radius: 12px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
-        .nav { display: flex; gap: 10px; flex-wrap: wrap; }
-        .btn { padding: 10px 18px; border-radius: 6px; text-decoration: none; font-weight: bold; border: none; cursor: pointer; transition: all 0.2s; display: inline-block; font-size: 0.9em; }
-        .btn-secondary { background: #2196F3; color: white; }
-        .btn-danger { background: #f44336; color: white; }
-        .btn:hover { transform: translateY(-2px); }
-        .cam-section { background: rgba(255,255,255,0.15); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-        .cam-section h2 { margin-bottom: 15px; }
-        .files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; }
-        .file-card { background: rgba(0,0,0,0.3); border-radius: 8px; overflow: hidden; text-align: center; }
-        .file-card img { width: 100%; height: 130px; object-fit: cover; display: block; cursor: pointer; }
-        .file-card .file-name { padding: 8px; font-size: 0.75em; opacity: 0.8; word-break: break-all; }
-        .file-card .file-actions { padding: 0 8px 10px; display: flex; gap: 6px; justify-content: center; }
-        .file-card .file-actions a { font-size: 0.8em; padding: 4px 10px; }
-        .file-card.video-card img { position: relative; }
-        .empty { text-align: center; opacity: 0.6; padding: 30px; }
-        .lightbox { display: none; position: fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.9); z-index:9999; align-items:center; justify-content:center; }
-        .lightbox.active { display: flex; }
-        .lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 8px; }
-        .lightbox-close { position: fixed; top: 20px; right: 30px; color: white; font-size: 2em; cursor: pointer; }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Linha do Tempo – DVR</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0f1923;color:#e0e0e0;min-height:100vh}
+a{color:inherit;text-decoration:none}
+
+/* HEADER */
+.topbar{background:#1a2533;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;border-bottom:2px solid #263548}
+.topbar h1{font-size:1.1em;color:#fff}
+.topbar-nav{display:flex;gap:8px}
+.btn{padding:7px 16px;border-radius:6px;font-size:.85em;font-weight:600;cursor:pointer;border:none;display:inline-block;transition:opacity .2s}
+.btn:hover{opacity:.85}
+.btn-live{background:#2196F3;color:#fff}
+.btn-logout{background:#f44336;color:#fff}
+
+/* LAYOUT */
+.wrap{max-width:1280px;margin:0 auto;padding:24px 16px}
+
+/* CAMERA TABS */
+.cam-tabs{display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap}
+.cam-tab{padding:8px 20px;border-radius:20px;background:#1a2533;border:2px solid #263548;cursor:pointer;font-size:.9em;transition:all .2s}
+.cam-tab.active{background:#2196F3;border-color:#2196F3;color:#fff}
+
+/* DATE GROUP */
+.date-group{margin-bottom:32px}
+.date-label{font-size:.8em;font-weight:700;color:#90a4ae;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;padding-left:4px}
+
+/* TIMELINE */
+.timeline{position:relative;padding-left:56px}
+.timeline::before{content:'';position:absolute;left:20px;top:0;bottom:0;width:2px;background:#263548}
+
+/* HOUR BLOCK */
+.hour-block{margin-bottom:18px}
+.hour-pin{position:absolute;left:8px;width:26px;height:26px;border-radius:50%;background:#263548;border:2px solid #37474f;display:flex;align-items:center;justify-content:center;font-size:.65em;color:#90a4ae;font-weight:700;margin-top:3px}
+.hour-label{font-size:.75em;color:#546e7a;margin-bottom:8px;padding-left:4px}
+.clips-row{display:flex;flex-wrap:wrap;gap:10px}
+
+/* CLIP CARD */
+.clip{width:180px;border-radius:8px;overflow:hidden;background:#1a2533;border:1px solid #263548;cursor:pointer;transition:transform .15s,border-color .15s}
+.clip:hover{transform:translateY(-3px);border-color:#2196F3}
+.clip-thumb{width:180px;height:105px;background:#0d1520;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+.clip-thumb img{width:100%;height:100%;object-fit:cover}
+.clip-play{position:absolute;width:44px;height:44px;border-radius:50%;background:rgba(33,150,243,.85);display:flex;align-items:center;justify-content:center;font-size:1.2em}
+.clip-info{padding:8px 10px}
+.clip-time{font-size:.8em;font-weight:600;color:#e0e0e0}
+.clip-size{font-size:.7em;color:#546e7a;margin-top:2px}
+.clip-dl{float:right;font-size:.7em;padding:3px 8px;border-radius:4px;background:#263548;color:#90a4ae;margin-top:-2px}
+.clip-dl:hover{background:#2196F3;color:#fff}
+
+/* SNAP CARD */
+.snap{width:140px;border-radius:8px;overflow:hidden;background:#1a2533;border:1px solid #263548;cursor:pointer;transition:transform .15s,border-color .15s}
+.snap:hover{transform:translateY(-3px);border-color:#4caf50}
+.snap-thumb{width:140px;height:84px;object-fit:cover;display:block}
+.snap-info{padding:6px 8px}
+.snap-time{font-size:.75em;color:#90a4ae}
+
+/* MODAL */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;align-items:center;justify-content:center;flex-direction:column;gap:12px}
+.modal.open{display:flex}
+.modal video,.modal img{max-width:94vw;max-height:82vh;border-radius:8px;outline:none}
+.modal-close{position:fixed;top:16px;right:24px;font-size:2em;color:#fff;cursor:pointer;line-height:1}
+.modal-title{color:#ccc;font-size:.85em;max-width:94vw;text-align:center}
+.modal-dl{margin-top:4px;padding:7px 18px;border-radius:6px;background:#2196F3;color:#fff;font-size:.85em;font-weight:600}
+
+.empty{text-align:center;color:#546e7a;padding:48px;font-size:.95em}
+.cam-panel{display:none}.cam-panel.active{display:block}
+
+/* scrollbar */
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0f1923}::-webkit-scrollbar-thumb{background:#263548;border-radius:3px}
+</style>
 </head>
 <body>
-<div class="container">
-    <div class="header">
-        <h1>🎞️ Gravações e Snapshots</h1>
-        <div class="nav">
-            <a href="/" class="btn btn-secondary">🏠 Câmeras</a>
-            <a href="/cameras" class="btn btn-secondary">⚙️ Config</a>
-            <a href="/logout" class="btn btn-danger">🚪 Sair</a>
-        </div>
+
+<div class="topbar">
+  <h1>&#x23F1;&#xFE0F; Linha do Tempo de Gravações</h1>
+  <div class="topbar-nav">
+    <a href="/" class="btn btn-live">&#x1F4F9; Ao Vivo</a>
+    <a href="/cameras" class="btn btn-live" style="background:#455a64">&#x2699;&#xFE0F; Config</a>
+    <a href="/logout" class="btn btn-logout">Sair</a>
+  </div>
+</div>
+
+<div class="wrap">
+
+{% if files_by_cam %}
+  <!-- TABS -->
+  <div class="cam-tabs">
+    {% for cam_id, data in files_by_cam.items() %}
+    <div class="cam-tab {% if loop.first %}active{% endif %}"
+         onclick="switchCam('{{ cam_id }}')">
+      &#x1F4F7; {{ data.name }}
+      <span style="opacity:.6;font-size:.8em">({{ data.files|length }})</span>
     </div>
+    {% endfor %}
+  </div>
 
-    {% if files_by_cam %}
-        {% for cam_id, data in files_by_cam.items() %}
-        <div class="cam-section">
-            <h2>📹 {{ data.name }}</h2>
-            {% if data.files %}
-            <div class="files-grid">
-                {% for fname in data.files %}
-                {% set is_video = fname.endswith('.avi') or fname.endswith('.mp4') %}
-                <div class="file-card {{ 'video-card' if is_video else '' }}">
-                    {% if is_video %}
-                        <div style="height:130px; display:flex; align-items:center; justify-content:center; font-size:3em; background:rgba(0,0,0,0.5);">🎬</div>
-                    {% else %}
-                        <img src="/recordings/{{ cam_id }}/{{ fname }}" loading="lazy"
-                             onclick="showLightbox('/recordings/{{ cam_id }}/{{ fname }}')" alt="{{ fname }}">
-                    {% endif %}
-                    <div class="file-name">{{ fname }}</div>
-                    <div class="file-actions">
-                        <a href="/recordings/{{ cam_id }}/{{ fname }}" download class="btn btn-secondary">⬇️</a>
-                    </div>
+  <!-- PANELS -->
+  {% for cam_id, data in files_by_cam.items() %}
+  <div class="cam-panel {% if loop.first %}active{% endif %}" id="panel-{{ cam_id }}">
+    {% if data.by_date %}
+      {% for date_str, hours in data.by_date.items() %}
+      <div class="date-group">
+        <div class="date-label">&#x1F4C5; {{ date_str }}</div>
+        <div class="timeline">
+          {% for hour, items in hours.items() %}
+          <div class="hour-block" style="position:relative">
+            <div class="hour-pin">{{ hour }}h</div>
+            <div style="padding-left:28px">
+              <div class="clips-row">
+                {% for item in items %}
+                {% if item.is_video %}
+                <div class="clip"
+                     onclick="playVideo('/recordings/{{ cam_id }}/{{ item.fname }}','{{ item.label }}','/recordings/{{ cam_id }}/{{ item.fname }}')">
+                  <div class="clip-thumb">
+                    <div style="color:#546e7a;font-size:2em">&#x1F3AC;</div>
+                    <div class="clip-play">&#x25B6;</div>
+                  </div>
+                  <div class="clip-info">
+                    <div class="clip-time">{{ item.label }}</div>
+                    <div class="clip-size">{{ item.size }}</div>
+                    <a href="/recordings/{{ cam_id }}/{{ item.fname }}" download
+                       onclick="event.stopPropagation()" class="clip-dl">&#x2B07;</a>
+                  </div>
                 </div>
+                {% else %}
+                <div class="snap"
+                     onclick="showImg('/recordings/{{ cam_id }}/{{ item.fname }}','{{ item.label }}','/recordings/{{ cam_id }}/{{ item.fname }}')">
+                  <img class="snap-thumb"
+                       src="/recordings/{{ cam_id }}/{{ item.fname }}" loading="lazy"
+                       alt="{{ item.fname }}">
+                  <div class="snap-info">
+                    <div class="snap-time">{{ item.label }}</div>
+                  </div>
+                </div>
+                {% endif %}
                 {% endfor %}
+              </div>
             </div>
-            {% else %}
-            <p class="empty">Nenhuma gravação ainda.</p>
-            {% endif %}
+          </div>
+          {% endfor %}
         </div>
-        {% endfor %}
+      </div>
+      {% endfor %}
     {% else %}
-        <div class="cam-section"><p class="empty">Nenhuma gravação encontrada. Ative a detecção de movimento ou tire snapshots na tela de configuração.</p></div>
+      <p class="empty">Nenhuma gravação ainda para esta câmera.</p>
     {% endif %}
+  </div>
+  {% endfor %}
+
+{% else %}
+  <p class="empty">Nenhuma gravação encontrada. Ative a detecção de movimento na tela de configuração.</p>
+{% endif %}
+
+</div><!-- /wrap -->
+
+<!-- MODAL VIDEO/IMAGEM -->
+<div class="modal" id="modal" onclick="closeModal(event)">
+  <span class="modal-close" onclick="closeModal()">&#x2715;</span>
+  <video id="modal-video" controls style="display:none"></video>
+  <img  id="modal-img"   style="display:none" alt="">
+  <div class="modal-title" id="modal-title"></div>
+  <a   id="modal-dl" href="#" download class="modal-dl">&#x2B07; Baixar</a>
 </div>
 
-<div class="lightbox" id="lightbox" onclick="closeLightbox()">
-    <span class="lightbox-close">✕</span>
-    <img id="lightbox-img" src="" alt="">
-</div>
 <script>
-function showLightbox(src) {
-    document.getElementById('lightbox-img').src = src;
-    document.getElementById('lightbox').classList.add('active');
+function switchCam(id){
+  document.querySelectorAll('.cam-tab').forEach((t,i)=>{
+    const panels=document.querySelectorAll('.cam-panel');
+    if(t.getAttribute('onclick').includes(id)){t.classList.add('active');panels[i].classList.add('active');}
+    else{t.classList.remove('active');panels[i].classList.remove('active');}
+  });
 }
-function closeLightbox() { document.getElementById('lightbox').classList.remove('active'); }
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+function openModal(title,dlUrl){
+  document.getElementById('modal').classList.add('open');
+  document.getElementById('modal-title').textContent=title;
+  document.getElementById('modal-dl').href=dlUrl;
+}
+function closeModal(e){
+  if(e&&e.target!==document.getElementById('modal')&&!e.target.classList.contains('modal-close'))return;
+  const m=document.getElementById('modal');
+  m.classList.remove('open');
+  const v=document.getElementById('modal-video');
+  v.pause();v.src='';v.style.display='none';
+  document.getElementById('modal-img').style.display='none';
+}
+function playVideo(src,title,dl){
+  const v=document.getElementById('modal-video');
+  document.getElementById('modal-img').style.display='none';
+  v.style.display='block';v.src=src;
+  openModal(title,dl);
+  v.play();
+}
+function showImg(src,title,dl){
+  const i=document.getElementById('modal-img');
+  document.getElementById('modal-video').style.display='none';
+  i.style.display='block';i.src=src;
+  openModal(title,dl);
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal({target:document.getElementById('modal')});});
 </script>
 </body>
 </html>

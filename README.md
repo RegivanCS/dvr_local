@@ -1,6 +1,6 @@
 # 🎥 DVR Local — Sistema de Câmeras IP
 
-Visualização remota de câmeras IP via browser, com autenticação, scanner automático e cadastro com um comando.
+Visualização ao vivo, gravação por movimento e acesso remoto de câmeras IP via browser, sem necessidade de port forwarding — usando Cloudflare Tunnels.
 
 **Acesso remoto:** https://dvr.regivan.tec.br
 
@@ -9,14 +9,46 @@ Visualização remota de câmeras IP via browser, com autenticação, scanner au
 ## 🏗️ Arquitetura
 
 ```
-[Câmeras IP] ── rede local ──[Roteador]── Internet ──[dvr.regivan.tec.br]
-                                  │                         │
-                            port forwarding           Flask + Passenger
-                            8081 → cam1:80            Apache + ModSecurity
-                            8082 → cam2:80            DirectAdmin (Python 3.11)
+[Câmeras IP RTSP]
+  192.168.1.5 (cam1)  ─┐
+  192.168.1.6 (cam2)  ─┤
+                        ▼
+              [ PC local — rede doméstica ]
+              ┌─────────────────────────────────────────────────┐
+              │  rtsp_proxy.py    (porta 8191, 8192)            │
+              │    ffmpeg → captura frame RTSP → serve JPEG     │
+              │                                                  │
+              │  motion_recorder.py                             │
+              │    detecta movimento → grava MP4                │
+              │    saída: recordings/cam1/ e recordings/cam2/   │
+              │                                                  │
+              │  recordings_relay.py  (porta 8290)              │
+              │    serve galeria de gravações (Flask)           │
+              │                                                  │
+              │  tunnel_relay.py                                │
+              │    cloudflared → expõe 8191/8192 na internet    │
+              │    cloudflared → expõe 8290 na internet         │
+              └─────────────────────────────────────────────────┘
+                        │ HTTPS (trycloudflare.com)
+                        ▼
+              [ dvr.regivan.tec.br ]
+              ┌───────────────────────────────┐
+              │  app.py  (Flask + Passenger)  │
+              │  Apache + ModSecurity         │
+              │  DirectAdmin (Python 3.11)    │
+              └───────────────────────────────┘
+                        │
+                        ▼
+              [ Browser / celular ]
 ```
 
-O app roda no servidor e busca snapshots das câmeras **server-side**. O browser só conversa com o servidor.
+**Fluxo de imagem ao vivo:**
+`Câmera RTSP → ffmpeg (local) → JPEG via HTTP → Cloudflare Tunnel → DVR (dvr.regivan.tec.br) → Browser`
+
+**Fluxo de gravações:**
+`motion_recorder.py detecta movimento → MP4 salvo localmente → recordings_relay.py → Cloudflare Tunnel → DVR /recordings`
+
+> Não é necessário port forwarding no roteador.
 
 ---
 

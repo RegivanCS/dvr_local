@@ -1,4 +1,4 @@
-"""
+﻿"""
 DVR Local Agent — roda na rede local onde estão as câmeras.
 Faz polling no servidor por comandos e executa scans localmente.
 
@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─── CONFIGURAÇÕES ───────────────────────────────────────────
 DVR_URL      = 'https://dvr.regivan.tec.br'
 DVR_USER     = 'admin'
-DVR_PASSWORD = ''           # senha do DVR app
+DVR_PASSWORD = '!Rede!123'           # senha do DVR app
 
 AGENT_NAME   = socket.gethostname()   # identificador deste agente
 POLL_INTERVAL = 3                     # segundos entre polls
