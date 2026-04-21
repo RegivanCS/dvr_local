@@ -52,18 +52,21 @@ def rtsp_url(cam):
 
 
 def capture_loop(cam):
-    """Captura frame único em loop com timeout (evita travar em frame antigo)."""
+    """Captura frames em loop contínuo via ffmpeg streaming (processo único, sem reiniciar a cada frame)."""
     url = rtsp_url(cam)
     key = f'{cam["ip"]}:{cam["rtsp_port"]}'
     print(f'  📷 Capturando: {url}')
+
     while True:
+        proc = None
         try:
-            proc = subprocess.run(
+            # Processo ffmpeg persistente: lê o stream RTSP e gera ~5 JPEGs/s continuamente
+            proc = subprocess.Popen(
                 [
                     FFMPEG,
                     '-rtsp_transport', 'tcp',
                     '-i', url,
-                    '-frames:v', '1',
+                    '-vf', 'fps=5',          # 5 fps de saída
                     '-f', 'image2pipe',
                     '-vcodec', 'mjpeg',
                     '-q:v', '5',
@@ -72,21 +75,44 @@ def capture_loop(cam):
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                timeout=8,
             )
-            data = proc.stdout or b''
-            start = data.find(b'\xff\xd8')
-            end = data.rfind(b'\xff\xd9')
-            if start != -1 and end != -1 and end > start:
-                frame = data[start:end + 2]
-                with _lock:
-                    _frames[key] = frame
-                    _frame_ts[key] = time.time()
-        except subprocess.TimeoutExpired:
-            pass
+
+            buf = b''
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break  # ffmpeg encerrou — reconecta
+                buf += chunk
+
+                # Extrai todos os frames JPEG completos do buffer
+                while True:
+                    start = buf.find(b'\xff\xd8')
+                    if start == -1:
+                        buf = b''
+                        break
+                    end = buf.find(b'\xff\xd9', start + 2)
+                    if end == -1:
+                        # Frame incompleto — aguarda mais dados
+                        buf = buf[start:]
+                        break
+                    frame = buf[start:end + 2]
+                    buf = buf[end + 2:]
+                    with _lock:
+                        _frames[key] = frame
+                        _frame_ts[key] = time.time()
+
         except Exception as e:
             print(f'  ⚠️  Erro captura {key}: {e}')
-        time.sleep(0.6)
+        finally:
+            if proc:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+
+        print(f'  🔄 Reconectando câmera {key}...')
+        time.sleep(2)  # Aguarda antes de reconectar
 
 
 def make_handler(cam):

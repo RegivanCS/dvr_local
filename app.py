@@ -558,18 +558,21 @@ def gen_frames_from_camera(cam_id):
 
     while True:
         try:
-            response = requests.get(snapshot_url, auth=auth, timeout=5, headers=HTTP_HEADERS)
-            
+            # Evita cache intermediário (ex.: túnel/CDN) para não exibir frame antigo.
+            sep = '&' if '?' in snapshot_url else '?'
+            req_url = f"{snapshot_url}{sep}_ts={int(time.time() * 1000)}"
+            response = requests.get(req_url, auth=auth, timeout=5, headers=HTTP_HEADERS)
+
             if response.status_code == 200 and len(response.content) > 1000:
                 frame_count += 1
                 error_count = 0
-                
+
                 if frame_count % 100 == 0:
                     logger.info(f"Câmera {cam_id}: {frame_count} frames")
-                
+
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + response.content + b'\r\n')
-                
+
                 time.sleep(0.1)  # ~10 FPS
             else:
                 error_count += 1
@@ -1092,7 +1095,7 @@ def _motion_worker(cam_id: str, stop_event: threading.Event):
                 burst_active = False
 
             prev_frame = curr_frame
-            time.sleep(0.5)  # ~2 fps para detecção
+            time.sleep(0.15)  # ~6-7 fps para detecção
 
         except Exception as e:
             logger.error(f"Motion worker [{cam_id}]: {e}")
@@ -1114,7 +1117,7 @@ def _save_video_burst(cam_id: str, frames: list):
         first = cv2.imdecode(np.frombuffer(frames[0], np.uint8), cv2.IMREAD_COLOR)
         h, w = first.shape[:2]
         video_path = os.path.join(cam_dir, f'video_{ts_str}.avi')
-        out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'MJPG'), 2, (w, h))
+        out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'MJPG'), 6, (w, h))
         for frame_data in frames:
             img = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
             if img is not None:
@@ -1652,12 +1655,33 @@ INDEX_TEMPLATE = """
             align-items: center;
             justify-content: center;
             padding: 10px;
+            overflow: hidden;
         }
         .fullscreen-content img {
             width: 100%;
             height: 100%;
             object-fit: contain;
+            transition: transform 0.15s ease;
+            user-select: none;
+            -webkit-user-drag: none;
+            cursor: zoom-in;
         }
+        .zoom-controls { display: flex; align-items: center; gap: 6px; }
+        .zoom-btn {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            width: 34px;
+            height: 34px;
+            border-radius: 6px;
+            font-size: 1.1em;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        .zoom-btn:hover { background: rgba(255,255,255,0.4); }
+        .zoom-btn-reset { width: auto; padding: 0 10px; font-size: 0.85em; }
+        .zoom-label { font-size: 0.85em; min-width: 44px; text-align: center; opacity: 0.9; }
         @media (max-width: 768px) {
             .cameras { grid-template-columns: 1fr; gap: 14px; margin: 16px auto; padding: 0 10px; }
             .header { flex-direction: column; gap: 15px; text-align: center; }
@@ -1685,7 +1709,15 @@ INDEX_TEMPLATE = """
     <div id="fullscreen" class="fullscreen">
         <div class="fullscreen-header">
             <div class="fullscreen-title" id="fullscreen-title">Câmera</div>
-            <button class="fullscreen-close" onclick="closeFullscreen()">✕ Fechar</button>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <div class="zoom-controls">
+                    <button class="zoom-btn" onclick="zoomOut()" title="Diminuir zoom">−</button>
+                    <span class="zoom-label" id="zoom-label">100%</span>
+                    <button class="zoom-btn" onclick="zoomIn()" title="Aumentar zoom">+</button>
+                    <button class="zoom-btn zoom-btn-reset" onclick="resetZoom()" title="Resetar zoom">↺ Reset</button>
+                </div>
+                <button class="fullscreen-close" onclick="closeFullscreen()">✕ Fechar</button>
+            </div>
         </div>
         <div class="fullscreen-content">
             <img id="fullscreen-img" src="" alt="Camera">
@@ -1794,16 +1826,112 @@ INDEX_TEMPLATE = """
             }
         }
 
+        // === ZOOM ===
+        let _zoomLevel = 1, _panX = 0, _panY = 0;
+        let _isPanning = false, _panStartX = 0, _panStartY = 0;
+        let _lastTouchDist = null;
+
+        function _applyZoom() {
+            const img = document.getElementById('fullscreen-img');
+            const lbl = document.getElementById('zoom-label');
+            img.style.transform = `translate(${_panX}px, ${_panY}px) scale(${_zoomLevel})`;
+            img.style.transformOrigin = '50% 50%';
+            img.style.cursor = _zoomLevel > 1 ? 'grab' : 'zoom-in';
+            if (lbl) lbl.textContent = Math.round(_zoomLevel * 100) + '%';
+        }
+        function zoomIn()  { _zoomLevel = Math.min(_zoomLevel + 0.25, 5); _applyZoom(); }
+        function zoomOut() {
+            _zoomLevel = Math.max(_zoomLevel - 0.25, 1);
+            if (_zoomLevel === 1) { _panX = 0; _panY = 0; }
+            _applyZoom();
+        }
+        function resetZoom() { _zoomLevel = 1; _panX = 0; _panY = 0; _applyZoom(); }
+
+        // Zoom pela roda do mouse (centrado no cursor)
+        document.getElementById('fullscreen').addEventListener('wheel', function(e) {
+            if (!this.classList.contains('active')) return;
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.15 : -0.15;
+            const oldZoom = _zoomLevel;
+            _zoomLevel = Math.max(1, Math.min(5, _zoomLevel + delta));
+            if (_zoomLevel === 1) { _panX = 0; _panY = 0; _applyZoom(); return; }
+            // Ajusta o pan para manter o ponto sob o cursor
+            const content = document.querySelector('.fullscreen-content');
+            const rect = content.getBoundingClientRect();
+            const mx = e.clientX - rect.left - rect.width / 2;
+            const my = e.clientY - rect.top - rect.height / 2;
+            const ratio = _zoomLevel / oldZoom;
+            _panX = mx * (1 - ratio) + _panX * ratio;
+            _panY = my * (1 - ratio) + _panY * ratio;
+            _applyZoom();
+        }, { passive: false });
+
+        // Drag para navegar quando com zoom
+        const _fsImg = document.getElementById('fullscreen-img');
+        _fsImg.addEventListener('mousedown', function(e) {
+            if (_zoomLevel <= 1) return;
+            _isPanning = true;
+            _panStartX = e.clientX - _panX;
+            _panStartY = e.clientY - _panY;
+            this.style.cursor = 'grabbing';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', function(e) {
+            if (!_isPanning) return;
+            _panX = e.clientX - _panStartX;
+            _panY = e.clientY - _panStartY;
+            _applyZoom();
+        });
+        document.addEventListener('mouseup', function() {
+            if (_isPanning) {
+                _isPanning = false;
+                const img = document.getElementById('fullscreen-img');
+                if (img) img.style.cursor = _zoomLevel > 1 ? 'grab' : 'zoom-in';
+            }
+        });
+
+        // Pinch-to-zoom (touch)
+        const _fsEl = document.getElementById('fullscreen');
+        _fsEl.addEventListener('touchstart', function(e) {
+            if (e.touches.length === 2) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                _lastTouchDist = Math.sqrt(dx*dx + dy*dy);
+            }
+        }, { passive: true });
+        _fsEl.addEventListener('touchmove', function(e) {
+            if (e.touches.length === 2 && _lastTouchDist) {
+                e.preventDefault();
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const ratio = dist / _lastTouchDist;
+                _lastTouchDist = dist;
+                _zoomLevel = Math.max(1, Math.min(5, _zoomLevel * ratio));
+                if (_zoomLevel === 1) { _panX = 0; _panY = 0; }
+                _applyZoom();
+            }
+        }, { passive: false });
+        _fsEl.addEventListener('touchend', function() { _lastTouchDist = null; }, { passive: true });
+        // === FIM ZOOM ===
+
         function openFullscreen(camId) {
             currentCam = camId;
+            resetZoom();
             document.getElementById('fullscreen-img').src = '/camera/' + camId;
             document.getElementById('fullscreen').classList.add('active');
         }
         function closeFullscreen() {
             document.getElementById('fullscreen').classList.remove('active');
+            resetZoom();
             currentCam = null;
         }
-        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFullscreen(); });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') closeFullscreen();
+            if (e.key === '+' || e.key === '=') zoomIn();
+            if (e.key === '-') zoomOut();
+            if (e.key === '0') resetZoom();
+        });
         setInterval(() => {
             document.querySelectorAll('.camera-box img').forEach(img => {
                 img.src = img.src.split('?')[0] + '?t=' + Date.now();
