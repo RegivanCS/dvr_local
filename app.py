@@ -500,7 +500,7 @@ def index():
     for cam_id, cam_info in cameras.items():
         if cam_info.get('enabled', True):
             camera_boxes += f"""
-            <div class="camera-box" onclick="openFullscreen('{cam_id}')">
+            <div class="camera-box" data-cam-id="{cam_id}" onclick="openFullscreen('{cam_id}')">
                 <h3>📹 {cam_info['name']}</h3>
                 <img src="/camera/{cam_id}" alt="{cam_info['name']}" id="cam-{cam_id}">
                 <div class="status">
@@ -1024,30 +1024,47 @@ def _save_video_burst(cam_id: str, frames: list):
                 f.write(frame_data)
         logger.info(f"Frames de vídeo salvos em {cam_dir} (cv2 indisponível)")
 
+def _is_motion_active(cam_id: str) -> bool:
+    t = _motion_threads.get(cam_id)
+    return bool(t and t.is_alive())
+
+def _start_motion_for_cam(cam_id: str, config: dict | None = None):
+    if config is None:
+        config = load_config()
+    if cam_id not in config.get('cameras', {}):
+        return False, 'Câmera não encontrada'
+    if _is_motion_active(cam_id):
+        return False, 'Já ativa'
+    stop_ev = threading.Event()
+    _motion_stop[cam_id] = stop_ev
+    t = threading.Thread(target=_motion_worker, args=(cam_id, stop_ev), daemon=True)
+    _motion_threads[cam_id] = t
+    t.start()
+    return True, 'Iniciada'
+
+def _stop_motion_for_cam(cam_id: str):
+    if cam_id in _motion_stop:
+        _motion_stop[cam_id].set()
+    return True
+
 # ── Rotas de gravação/detecção ─────────────────────────────────
 
 @app.route('/api/camera/<cam_id>/motion/start', methods=['POST'])
 @login_required
 def start_motion(cam_id):
     """Inicia detecção de movimento para a câmera"""
-    config = load_config()
-    if cam_id not in config.get('cameras', {}):
-        return jsonify({'success': False, 'error': 'Câmera não encontrada'}), 404
-    if cam_id in _motion_threads and _motion_threads[cam_id].is_alive():
-        return jsonify({'success': False, 'error': 'Já ativa'})
-    stop_ev = threading.Event()
-    _motion_stop[cam_id] = stop_ev
-    t = threading.Thread(target=_motion_worker, args=(cam_id, stop_ev), daemon=True)
-    _motion_threads[cam_id] = t
-    t.start()
+    ok, msg = _start_motion_for_cam(cam_id)
+    if not ok and msg == 'Câmera não encontrada':
+        return jsonify({'success': False, 'error': msg}), 404
+    if not ok:
+        return jsonify({'success': False, 'error': msg})
     return jsonify({'success': True})
 
 @app.route('/api/camera/<cam_id>/motion/stop', methods=['POST'])
 @login_required
 def stop_motion(cam_id):
     """Para detecção de movimento"""
-    if cam_id in _motion_stop:
-        _motion_stop[cam_id].set()
+    _stop_motion_for_cam(cam_id)
     return jsonify({'success': True})
 
 @app.route('/api/camera/<cam_id>/motion/status')
@@ -1057,6 +1074,56 @@ def motion_status(cam_id):
     if cam_id in _motion_threads:
         status['active'] = _motion_threads[cam_id].is_alive()
     return jsonify(status)
+
+@app.route('/api/motion/start-all', methods=['POST'])
+@login_required
+def start_motion_all():
+    """Inicia detecção para todas as câmeras ativas (enabled=true)."""
+    config = load_config()
+    cameras = config.get('cameras', {})
+    active_cam_ids = [cid for cid, cam in cameras.items() if cam.get('enabled', True)]
+
+    started, already, failed = [], [], []
+    for cam_id in active_cam_ids:
+        ok, msg = _start_motion_for_cam(cam_id, config=config)
+        if ok:
+            started.append(cam_id)
+        elif msg == 'Já ativa':
+            already.append(cam_id)
+        else:
+            failed.append({'cam_id': cam_id, 'error': msg})
+
+    return jsonify({
+        'success': True,
+        'enabled': len(active_cam_ids),
+        'started': started,
+        'already': already,
+        'failed': failed,
+    })
+
+@app.route('/api/motion/stop-all', methods=['POST'])
+@login_required
+def stop_motion_all():
+    """Para detecção para todas as câmeras com thread ativa."""
+    active_ids = [cid for cid in _motion_threads.keys() if _is_motion_active(cid)]
+    for cam_id in active_ids:
+        _stop_motion_for_cam(cam_id)
+    return jsonify({'success': True, 'stopped': active_ids})
+
+@app.route('/api/motion/summary')
+@login_required
+def motion_summary():
+    """Resumo global de motion para o botão do dashboard."""
+    config = load_config()
+    cameras = config.get('cameras', {})
+    enabled_ids = [cid for cid, cam in cameras.items() if cam.get('enabled', True)]
+    active_ids = [cid for cid in enabled_ids if _is_motion_active(cid)]
+    return jsonify({
+        'enabled_count': len(enabled_ids),
+        'active_count': len(active_ids),
+        'all_active': (len(enabled_ids) > 0 and len(active_ids) == len(enabled_ids)),
+        'active_ids': active_ids,
+    })
 
 @app.route('/api/camera/<cam_id>/snapshot', methods=['POST'])
 @login_required
@@ -1390,6 +1457,8 @@ INDEX_TEMPLATE = """
         }
         .btn-config { background: #4CAF50; color: white; }
         .btn-scan { background: #2196F3; color: white; }
+        .btn-record { background: #c0392b; color: white; }
+        .btn-record.active { background: #27ae60; }
         .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
         .cameras {
             display: grid;
@@ -1475,6 +1544,7 @@ INDEX_TEMPLATE = """
     <div class="header">
         <h1>🎥 DVR Local</h1>
         <div class="header-buttons">
+            <button id="btn-motion-all" class="btn btn-record" onclick="toggleMotionAll()">⏺️ Gravar todas</button>
             <a href="/cameras" class="btn btn-config">⚙️ Configurar</a>
             <a href="/scan" class="btn btn-scan">🔍 Buscar</a>
             <a href="/recordings" class="btn" style="background:#e67e22;">🎞️ Gravações</a>
@@ -1493,6 +1563,107 @@ INDEX_TEMPLATE = """
     </div>
     <script>
         let currentCam = null;
+        let motionAllActive = false;
+
+        function getEnabledCamIds() {
+            return Array.from(document.querySelectorAll('.camera-box[data-cam-id]'))
+                .map(el => el.getAttribute('data-cam-id'))
+                .filter(Boolean);
+        }
+
+        async function parseJsonSafe(response) {
+            const txt = await response.text();
+            try {
+                return { ok: true, data: JSON.parse(txt), raw: txt };
+            } catch (_) {
+                return { ok: false, data: null, raw: txt };
+            }
+        }
+
+        async function startOrStopEachCam(start) {
+            const camIds = getEnabledCamIds();
+            if (!camIds.length) return { success: false, error: 'Nenhuma câmera ativa na tela' };
+            let okCount = 0;
+            for (const camId of camIds) {
+                const endpoint = start
+                    ? `/api/camera/${camId}/motion/start`
+                    : `/api/camera/${camId}/motion/stop`;
+                try {
+                    const r = await fetch(endpoint, { method: 'POST' });
+                    if (!r.ok) continue;
+                    okCount += 1;
+                } catch (_) {}
+            }
+            return { success: okCount > 0, count: okCount, total: camIds.length };
+        }
+
+        function updateMotionButton(summary) {
+            const btn = document.getElementById('btn-motion-all');
+            if (!btn) return;
+            if (summary.enabled_count === 0) {
+                btn.disabled = true;
+                btn.classList.remove('active');
+                btn.textContent = '⏺️ Sem câmeras ativas';
+                return;
+            }
+            btn.disabled = false;
+            motionAllActive = !!summary.all_active;
+            if (motionAllActive) {
+                btn.classList.add('active');
+                btn.textContent = '⏹️ Parar gravação (' + summary.active_count + '/' + summary.enabled_count + ')';
+            } else {
+                btn.classList.remove('active');
+                btn.textContent = '⏺️ Gravar todas (' + summary.enabled_count + ')';
+            }
+        }
+
+        async function refreshMotionAllState() {
+            try {
+                const r = await fetch('/api/motion/summary');
+                const parsed = await parseJsonSafe(r);
+                const d = parsed.data;
+                if (parsed.ok && d && typeof d.enabled_count !== 'undefined') {
+                    updateMotionButton(d);
+                    return;
+                }
+                // Fallback quando rota global ainda não existe no servidor remoto
+                const enabled = getEnabledCamIds().length;
+                updateMotionButton({ enabled_count: enabled, active_count: 0, all_active: false });
+            } catch (e) {
+                console.warn('Falha ao atualizar estado de gravação global', e);
+            }
+        }
+
+        async function toggleMotionAll() {
+            const btn = document.getElementById('btn-motion-all');
+            btn.disabled = true;
+            try {
+                const endpoint = motionAllActive ? '/api/motion/stop-all' : '/api/motion/start-all';
+                const r = await fetch(endpoint, { method: 'POST' });
+                const parsed = await parseJsonSafe(r);
+                const d = parsed.data;
+
+                if (parsed.ok && d && d.success) {
+                    await refreshMotionAllState();
+                    return;
+                }
+
+                // Fallback: usa APIs por câmera quando /api/motion/start-all não estiver disponível
+                const fallback = await startOrStopEachCam(!motionAllActive);
+                if (!fallback.success) {
+                    if (!parsed.ok && parsed.raw && parsed.raw.includes('/login')) {
+                        throw new Error('Sessão expirada. Faça login novamente.');
+                    }
+                    throw new Error((d && d.error) || fallback.error || 'Falha ao alterar gravação');
+                }
+                await refreshMotionAllState();
+            } catch (e) {
+                alert('Erro: ' + e.message);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
         function openFullscreen(camId) {
             currentCam = camId;
             document.getElementById('fullscreen-img').src = '/camera/' + camId;
@@ -1508,6 +1679,8 @@ INDEX_TEMPLATE = """
                 img.src = img.src.split('?')[0] + '?t=' + Date.now();
             });
         }, 30000);
+        refreshMotionAllState();
+        setInterval(refreshMotionAllState, 12000);
     </script>
 </body>
 </html>
