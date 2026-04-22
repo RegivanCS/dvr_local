@@ -137,7 +137,7 @@ Agora quando não há câmeras registradas, o DVR mostra um banner sugerindo rod
    ```bash
    python agent.py
    ```
-   O agent se conecta ao DVR remoto e fica aguardando comandos.
+   O agent se conecta ao DVR local (127.0.0.1:8000 por padrão) e fica aguardando comandos.
 
 2. **No DVR Local** (http://127.0.0.1:8000):
    - Se não houver câmeras, aparece um aviso: **"⚠️ Nenhuma câmera detectada"**
@@ -150,10 +150,11 @@ Agora quando não há câmeras registradas, o DVR mostra um banner sugerindo rod
 
 ### O que o agent.py faz
 
-- Conecta ao DVR: `https://dvr.regivan.tec.br`
+- Conecta ao DVR local por padrão: `http://127.0.0.1:8000`
+- Também aceita URL por argumento: `python agent.py https://dvr.regivan.tec.br`
 - Envia heartbeat a cada 3 segundos (prova de vida)
 - Aguarda comando "scan" do DVR
-- Quando recebe scan, escaneia a rede local por câmeras HTTP
+- Quando recebe scan, escaneia a rede local por câmeras HTTP/RTSP
 - Envia resultados de volta ao DVR
 
 ---

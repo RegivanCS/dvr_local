@@ -539,12 +539,40 @@ def gen_frames_from_camera(cam_id):
         try:
             import cv2
             creds = f'{user}:{password}@' if user else ''
-            rtsp_url = f'rtsp://{creds}{ip}:554'
+            rtsp_url = cam.get('stream_url') or f'rtsp://{ip}:{port}'
+            if rtsp_url.startswith('rtsp://') and '@' not in rtsp_url and user:
+                rtsp_url = rtsp_url.replace('rtsp://', f'rtsp://{creds}', 1)
+
+            # Dica para backend FFmpeg do OpenCV priorizar baixa latência.
+            os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = (
+                'rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|'
+                'max_delay;0|reorder_queue_size;0|buffer_size;102400'
+            )
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            # Tenta reduzir fila interna para evitar efeito de atraso acumulado.
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            try:
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
+            except Exception:
+                pass
+
             frame_count = 0
             error_count = 0
             while True:
-                ret, frame = cap.read()
+                # Descarta frames antigos que ficaram na fila para reduzir latência visual.
+                for _ in range(2):
+                    try:
+                        cap.grab()
+                    except Exception:
+                        break
+                ret, frame = cap.retrieve()
+                if not ret or frame is None:
+                    ret, frame = cap.read()
+
                 if ret and frame is not None:
                     ok, buf = cv2.imencode('.jpg', frame)
                     if ok:
@@ -552,14 +580,14 @@ def gen_frames_from_camera(cam_id):
                         error_count = 0
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
                                + bytes(buf) + b'\r\n')
-                        time.sleep(0.1)
+                        time.sleep(0.03)
                         continue
                 error_count += 1
                 if error_count > 20:
                     logger.error(f'Câmera {cam_id}: RTSP sem resposta')
                     cap.release()
                     break
-                time.sleep(0.5)
+                time.sleep(0.1)
         except ImportError:
             logger.error(f'Câmera {cam_id}: OpenCV não instalado — necessário para câmeras RTSP-only')
         return
@@ -625,7 +653,9 @@ def index():
             camera_boxes += f"""
             <div class="camera-box" data-cam-id="{cam_id}" onclick="openFullscreen('{cam_id}')">
                 <h3>📹 {cam_info['name']}</h3>
-                <img src="/camera/{cam_id}" alt="{cam_info['name']}" id="cam-{cam_id}">
+                <img src="/camera/{cam_id}" alt="{cam_info['name']}" id="cam-{cam_id}"
+                     data-stream-src="/camera/{cam_id}"
+                     data-snapshot-src="/api/camera/{cam_id}/snapshot_img">
                 <div class="status">
                     {cam_info['ip']}:{cam_info['port']} • {CAMERA_MODELS.get(cam_info.get('model', 'generic'), {}).get('name', 'Genérico')}
                 </div>
@@ -803,10 +833,15 @@ def toggle_camera(cam_id):
 @login_required
 def camera_stream(cam_id):
     """Stream MJPEG da câmera"""
-    return Response(
+    resp = Response(
         gen_frames_from_camera(cam_id),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
+    # Ajuda a evitar buffering intermediário e melhora a fluidez no cliente.
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
 
 @app.route('/scan')
 @login_required
@@ -1806,6 +1841,95 @@ INDEX_TEMPLATE = """
     <script>
         let currentCam = null;
         let motionAllActive = false;
+        let _remoteGridLoops = new Map();
+        let _remoteFsStop = null;
+        const _LOCAL_HOSTS = ['localhost', '127.0.0.1', '::1'];
+        const REMOTE_VIEW_MODE = !_LOCAL_HOSTS.includes(window.location.hostname);
+
+        function _startRemoteImageLoop(img, baseUrl, opts = {}) {
+            const minMs = opts.minMs ?? 90;
+            const maxMs = opts.maxMs ?? 280;
+            const firstMs = opts.firstMs ?? 130;
+            const failMs = opts.failMs ?? 360;
+            let stopped = false;
+            let timer = null;
+            let delayMs = firstMs;
+
+            const schedule = (ms) => {
+                if (stopped) return;
+                timer = setTimeout(tick, ms);
+            };
+
+            const tick = () => {
+                if (stopped) return;
+                const started = performance.now();
+                const sep = baseUrl.includes('?') ? '&' : '?';
+                const nextUrl = `${baseUrl}${sep}t=${Date.now()}`;
+                const pre = new Image();
+                pre.decoding = 'async';
+
+                pre.onload = () => {
+                    if (stopped) return;
+                    img.src = nextUrl;
+                    const elapsed = performance.now() - started;
+                    delayMs = Math.max(minMs, Math.min(maxMs, elapsed * 0.7 + 35));
+                    schedule(delayMs);
+                };
+
+                pre.onerror = () => {
+                    if (stopped) return;
+                    delayMs = Math.min(maxMs, delayMs + 60);
+                    schedule(Math.max(failMs, delayMs));
+                };
+
+                pre.src = nextUrl;
+            };
+
+            tick();
+            return () => {
+                stopped = true;
+                if (timer) clearTimeout(timer);
+            };
+        }
+
+        function _stopGridRemoteLoops() {
+            _remoteGridLoops.forEach(stop => {
+                try { stop(); } catch (_) {}
+            });
+            _remoteGridLoops.clear();
+        }
+
+        function _setCameraGridMode() {
+            _stopGridRemoteLoops();
+            document.querySelectorAll('.camera-box img').forEach(img => {
+                const streamSrc = img.dataset.streamSrc || img.getAttribute('src') || '';
+                const snapshotSrc = img.dataset.snapshotSrc || streamSrc;
+                if (REMOTE_VIEW_MODE) {
+                    img.setAttribute('src', snapshotSrc + '?t=' + Date.now());
+                } else {
+                    img.setAttribute('src', streamSrc);
+                }
+            });
+        }
+
+        function _startGridSnapshotPolling() {
+            if (!REMOTE_VIEW_MODE) {
+                _stopGridRemoteLoops();
+                return;
+            }
+            _stopGridRemoteLoops();
+            document.querySelectorAll('.camera-box img').forEach(img => {
+                const snapshotSrc = (img.dataset.snapshotSrc || img.getAttribute('src') || '').split('?')[0];
+                if (!snapshotSrc) return;
+                const stop = _startRemoteImageLoop(img, snapshotSrc, {
+                    minMs: 95,
+                    maxMs: 260,
+                    firstMs: 130,
+                    failMs: 360,
+                });
+                _remoteGridLoops.set(img.id || snapshotSrc, stop);
+            });
+        }
 
         function getEnabledCamIds() {
             return Array.from(document.querySelectorAll('.camera-box[data-cam-id]'))
@@ -1998,11 +2122,31 @@ INDEX_TEMPLATE = """
         function openFullscreen(camId) {
             currentCam = camId;
             resetZoom();
-            document.getElementById('fullscreen-img').src = '/camera/' + camId;
+            const fsImg = document.getElementById('fullscreen-img');
+            if (_remoteFsStop) {
+                _remoteFsStop();
+                _remoteFsStop = null;
+            }
+            if (REMOTE_VIEW_MODE) {
+                const snapBase = '/api/camera/' + camId + '/snapshot_img';
+                fsImg.src = snapBase + '?t=' + Date.now();
+                _remoteFsStop = _startRemoteImageLoop(fsImg, snapBase, {
+                    minMs: 80,
+                    maxMs: 220,
+                    firstMs: 110,
+                    failMs: 320,
+                });
+            } else {
+                fsImg.src = '/camera/' + camId;
+            }
             document.getElementById('fullscreen').classList.add('active');
         }
         function closeFullscreen() {
             document.getElementById('fullscreen').classList.remove('active');
+            if (_remoteFsStop) {
+                _remoteFsStop();
+                _remoteFsStop = null;
+            }
             resetZoom();
             currentCam = null;
         }
@@ -2012,11 +2156,8 @@ INDEX_TEMPLATE = """
             if (e.key === '-') zoomOut();
             if (e.key === '0') resetZoom();
         });
-        setInterval(() => {
-            document.querySelectorAll('.camera-box img').forEach(img => {
-                img.src = img.src.split('?')[0] + '?t=' + Date.now();
-            });
-        }, 30000);
+        _setCameraGridMode();
+        _startGridSnapshotPolling();
         refreshMotionAllState();
         setInterval(refreshMotionAllState, 12000);
 
