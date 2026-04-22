@@ -71,16 +71,24 @@ def start_services():
         script = os.path.join(BASE_DIR, svc["script"])
         if not os.path.exists(script):
             continue
-        log_f = open(_log_path(name), "a", encoding="utf-8", errors="replace")
+        
+        # Tenta abrir o arquivo de log, se estiver locked pula
+        log_f = None
+        try:
+            log_f = open(_log_path(name), "a", encoding="utf-8", errors="replace")
+        except (IOError, PermissionError):
+            print(f"[DVR] ! Nao conseguiu abrir log de {name}, usando DEVNULL")
+            log_f = subprocess.DEVNULL
+        
         proc = subprocess.Popen(
             [py, script],
             cwd=BASE_DIR,
-            stdout=log_f,
-            stderr=log_f,
+            stdout=log_f if log_f != subprocess.DEVNULL else subprocess.DEVNULL,
+            stderr=log_f if log_f != subprocess.DEVNULL else subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         _procs[name] = proc
-        print(f"[DVR] ▶ {name} iniciado (PID {proc.pid})")
+        print(f"[DVR] > {name} iniciado (PID {proc.pid})")
 
 
 def stop_services():
@@ -95,7 +103,7 @@ def stop_services():
                 proc.kill()
             except Exception:
                 pass
-        print(f"[DVR] ■ {name} encerrado")
+        print(f"[DVR] X {name} encerrado")
     _procs.clear()
 
 
@@ -148,30 +156,40 @@ def _run_tray():
     try:
         import pystray
         from pystray import MenuItem as Item, Menu
+    except ImportError:
+        print("[DVR] pystray nao instalado - abrindo browser diretamente.")
+        _wait_app_ready()
+        webbrowser.open(APP_URL)
+        return
 
+    try:
         icon_image = _make_icon_image()
-        if icon_image is None:
-            print("[DVR] Pillow não instalado — bandeja desativada, abrindo browser.")
-            _wait_app_ready()
-            webbrowser.open(APP_URL)
-            return
+    except Exception:
+        icon_image = None
+    
+    if icon_image is None:
+        print("[DVR] Nao conseguiu gerar icone - abrindo browser.")
+        _wait_app_ready()
+        webbrowser.open(APP_URL)
+        return
 
+    try:
         icon = pystray.Icon(
             "dvr_local",
             icon_image,
             "DVR Local",
             menu=Menu(
-                Item("🖥️  Abrir interface", _open_embedded, default=True),
-                Item("🌐  Abrir no browser", _open_in_browser),
+                Item("[ ] Abrir interface", _open_embedded, default=True),
+                Item("[W] Abrir no browser", _open_in_browser),
                 Menu.SEPARATOR,
-                Item("■  Encerrar DVR", _exit_app),
+                Item("[X] Encerrar DVR", _exit_app),
             ),
         )
         # Abre a janela embutida automaticamente após os serviços subirem
         threading.Thread(target=_auto_open, daemon=True).start()
         icon.run()
-    except ImportError:
-        print("[DVR] pystray não instalado — abrindo browser diretamente.")
+    except Exception as e:
+        print(f"[DVR] Erro na bandeja: {e} - abrindo browser.")
         _wait_app_ready()
         webbrowser.open(APP_URL)
 
@@ -189,6 +207,11 @@ def _launch_webview():
     global _webview_window
     try:
         import webview
+    except ImportError:
+        webbrowser.open(APP_URL)
+        return
+
+    try:
         if _webview_window is not None:
             # já aberta — só traz para frente
             try:
@@ -199,28 +222,33 @@ def _launch_webview():
 
         def _create():
             global _webview_window
-            _webview_window = webview.create_window(
-                "DVR Local",
-                APP_URL,
-                width=1280,
-                height=780,
-                resizable=True,
-                min_size=(800, 500),
-            )
-            webview.start()
-            _webview_window = None  # janela foi fechada
+            try:
+                _webview_window = webview.create_window(
+                    "DVR Local",
+                    APP_URL,
+                    width=1280,
+                    height=780,
+                    resizable=True,
+                    min_size=(800, 500),
+                )
+                webview.start()
+            except Exception as e:
+                print(f"[DVR] Erro pywebview: {e}")
+            finally:
+                _webview_window = None
 
-        # pywebview precisa rodar na thread principal ou em thread dedicada
+        # pywebview precisa rodar em thread dedicada
         t = threading.Thread(target=_create, daemon=True)
         t.start()
-    except ImportError:
+    except Exception as e:
+        print(f"[DVR] Erro ao abrir janela: {e}")
         webbrowser.open(APP_URL)
 
 
 # ── entrypoint ─────────────────────────────────────────────────────────────────
 def main():
     print("=" * 50)
-    print("  DVR Local — iniciando...")
+    print("  DVR Local - iniciando...")
     print(f"  Pasta base: {BASE_DIR}")
     print(f"  Python:     {_python_exe()}")
     print("=" * 50)
