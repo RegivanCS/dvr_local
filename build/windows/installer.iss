@@ -19,7 +19,7 @@ AppVersion={#AppVersion}
 AppPublisherURL={#AppURL}
 DefaultDirName={autopf}\DVR Local
 DefaultGroupName={#AppName}
-OutputDir=..\dist
+OutputDir=..\..\dist
 OutputBaseFilename=DVR_Local_Setup_v{#AppVersion}
 SetupIconFile=assets\dvr_icon.ico
 Compression=lzma
@@ -38,7 +38,7 @@ Name: "startupicon"; Description: "Iniciar automaticamente com o Windows";  Grou
 
 [Files]
 ; Executável gerado pelo PyInstaller
-Source: "..\dist\dvr_launcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\dist\dvr_launcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; ffmpeg (se existir na pasta build\windows\ffmpeg\)
 Source: "ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: FfmpegExists
 
