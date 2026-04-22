@@ -1610,11 +1610,11 @@ INDEX_TEMPLATE = """
         .camera-box h3 { margin-bottom: 10px; font-size: 1.3em; }
         .camera-box img {
             width: 100%;
-            aspect-ratio: 16 / 9;
+            height: auto;
+            display: block;
             border-radius: 8px;
             background: #000;
             border: 2px solid rgba(255, 255, 255, 0.1);
-            object-fit: cover;
         }
         .status {
             margin-top: 10px;
