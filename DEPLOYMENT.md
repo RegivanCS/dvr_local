@@ -127,27 +127,59 @@ sudo systemctl enable dvr_local
 
 ---
 
+## Auto-Discovery de Câmeras (Novo!)
+
+Agora quando não há câmeras registradas, o DVR mostra um banner sugerindo rodar o agent na rede local.
+
+### Como funciona
+
+1. **Na rede local das câmeras** (ex: LAN 192.168.1.x):
+   ```bash
+   python agent.py
+   ```
+   O agent se conecta ao DVR remoto e fica aguardando comandos.
+
+2. **No DVR Local** (http://127.0.0.1:8000):
+   - Se não houver câmeras, aparece um aviso: **"⚠️ Nenhuma câmera detectada"**
+   - O dashboard verifica a cada 15s se há agentes conectados
+   - Se encontrar um agente, **automaticamente inicia scan** da rede local
+
+3. **Resultado**:
+   - Câmeras encontradas no scan são registradas automaticamente
+   - Aparecem na tela ao vivo
+
+### O que o agent.py faz
+
+- Conecta ao DVR: `https://dvr.regivan.tec.br`
+- Envia heartbeat a cada 3 segundos (prova de vida)
+- Aguarda comando "scan" do DVR
+- Quando recebe scan, escaneia a rede local por câmeras HTTP
+- Envia resultados de volta ao DVR
+
+---
+
 ## Configuração Inicial
 
 ### 1. Login
 - **Usuário:** `admin`
 - **Senha:** `!Rede!123` (padrão)
 
-### 2. Adicionar Câmeras
-Vá para **⚙️ Configurar**:
+### 2. Auto-Descoberta de Câmeras (Recomendado)
+- Abra terminal na rede das câmeras
+- Execute: `python agent.py`
+- Volte ao DVR Local — o descobrimento iniciará automaticamente
+- Aguarde 10-30 segundos — câmeras aparecerão no dashboard
+
+### 3. Adicionar Câmeras Manualmente (Alternativo)
+Se preferir não usar agent, vá para **⚙️ Configurar**:
 1. Clique no botão **[+]** para adicionar câmera
-2. Preencha:
-   - **IP:** 192.168.1.5 (exemplo)
-   - **Porta:** 80
-   - **Usuário/Senha:** credenciais da câmera
-   - **Path:** `/snapshot.cgi` (depende do modelo)
-   - **Nome:** Nome exibido (ex: "Câmera Portão")
+2. Preencha os dados (IP, porta, credenciais)
 3. Clique **Testar** → se conectar, salva automaticamente
 
-### 3. Ativar Detecção de Movimento
+### 4. Ativar Detecção de Movimento
 - Dashboard: clique **⏺️ Gravar todas** para ativar
 
-### 4. Configurar Armazenamento Cíclico
+### 5. Configurar Armazenamento Cíclico
 - **⚙️ Configurar** → **Armazenamento e Gravação Cíclica**
   - **Limite máximo:** (ex: 50 GB)
   - **Reservar livre:** (ex: 10 GB)
