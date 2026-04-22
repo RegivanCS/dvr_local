@@ -40,7 +40,9 @@ Name: "startupicon"; Description: "Iniciar automaticamente com o Windows";  Grou
 ; Executável gerado pelo PyInstaller
 Source: "..\..\dist\dvr_launcher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; ffmpeg (se existir na pasta build\windows\ffmpeg\)
-Source: "ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: FfmpegExists
+#ifexist "ffmpeg"
+Source: "ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{group}\DVR Local";        Filename: "{app}\{#AppExe}"
