@@ -20,6 +20,7 @@ import subprocess
 import time
 import webbrowser
 import signal
+import ctypes
 
 # ── garante que o cwd seja sempre a pasta do launcher ─────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -38,8 +39,16 @@ SERVICES = [
 ]
 
 _procs: dict[str, subprocess.Popen] = {}
+_log_files: dict[str, object] = {}
 _running = False
 _webview_window = None
+_watchdog_thread = None
+_last_restart_at: dict[str, float] = {}
+
+# Flags de energia no Windows para evitar suspensão enquanto o DVR estiver ativo
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_AWAYMODE_REQUIRED = 0x00000040
 
 # ── detecção do executável Python ─────────────────────────────────────────────
 def _python_exe():
@@ -60,35 +69,99 @@ def _log_path(name: str) -> str:
     return os.path.join(logs, f"{name}.log")
 
 
+def _set_keep_awake(enabled: bool):
+    """Evita que o Windows entre em suspensão enquanto o DVR está em execução."""
+    if sys.platform != "win32":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        if enabled:
+            kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+            )
+        else:
+            kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+    except Exception as e:
+        print(f"[DVR] ! Falha ao configurar keep-awake: {e}")
+
+
+def _start_one_service(name: str, script: str, py: str) -> bool:
+    script_path = os.path.join(BASE_DIR, script)
+    if not os.path.exists(script_path):
+        print(f"[DVR] ! Script ausente: {script}")
+        return False
+
+    log_f = None
+    try:
+        log_f = open(_log_path(name), "a", encoding="utf-8", errors="replace")
+    except (IOError, PermissionError):
+        print(f"[DVR] ! Nao conseguiu abrir log de {name}, usando DEVNULL")
+        log_f = subprocess.DEVNULL
+
+    proc = subprocess.Popen(
+        [py, script_path],
+        cwd=BASE_DIR,
+        stdout=log_f if log_f != subprocess.DEVNULL else subprocess.DEVNULL,
+        stderr=log_f if log_f != subprocess.DEVNULL else subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+    _procs[name] = proc
+    _log_files[name] = log_f
+    print(f"[DVR] > {name} iniciado (PID {proc.pid})")
+    return True
+
+
+def _watchdog_loop():
+    """Monitora subprocessos e reinicia automaticamente quando algum cai."""
+    while _running:
+        try:
+            py = _python_exe()
+            for svc in SERVICES:
+                name = svc["name"]
+                proc = _procs.get(name)
+                if proc is None:
+                    continue
+
+                code = proc.poll()
+                if code is None:
+                    continue
+
+                # Evita loop agressivo de restart se o serviço falhar continuamente
+                now = time.time()
+                last = _last_restart_at.get(name, 0)
+                if now - last < 2.5:
+                    continue
+                _last_restart_at[name] = now
+
+                print(f"[DVR] ! {name} caiu (exit={code}) - reiniciando...")
+
+                old_log = _log_files.pop(name, None)
+                if old_log not in (None, subprocess.DEVNULL):
+                    try:
+                        old_log.close()
+                    except Exception:
+                        pass
+
+                _start_one_service(name, svc["script"], py)
+        except Exception as e:
+            print(f"[DVR] ! Erro no watchdog: {e}")
+
+        time.sleep(2)
+
+
 def start_services():
-    global _running
+    global _running, _watchdog_thread
     if _running:
         return
     _running = True
+    _set_keep_awake(True)
     py = _python_exe()
     for svc in SERVICES:
-        name   = svc["name"]
-        script = os.path.join(BASE_DIR, svc["script"])
-        if not os.path.exists(script):
-            continue
-        
-        # Tenta abrir o arquivo de log, se estiver locked pula
-        log_f = None
-        try:
-            log_f = open(_log_path(name), "a", encoding="utf-8", errors="replace")
-        except (IOError, PermissionError):
-            print(f"[DVR] ! Nao conseguiu abrir log de {name}, usando DEVNULL")
-            log_f = subprocess.DEVNULL
-        
-        proc = subprocess.Popen(
-            [py, script],
-            cwd=BASE_DIR,
-            stdout=log_f if log_f != subprocess.DEVNULL else subprocess.DEVNULL,
-            stderr=log_f if log_f != subprocess.DEVNULL else subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        _procs[name] = proc
-        print(f"[DVR] > {name} iniciado (PID {proc.pid})")
+        _start_one_service(svc["name"], svc["script"], py)
+
+    _watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True)
+    _watchdog_thread.start()
 
 
 def stop_services():
@@ -104,7 +177,16 @@ def stop_services():
             except Exception:
                 pass
         print(f"[DVR] X {name} encerrado")
+
+        log_f = _log_files.pop(name, None)
+        if log_f not in (None, subprocess.DEVNULL):
+            try:
+                log_f.close()
+            except Exception:
+                pass
+
     _procs.clear()
+    _set_keep_awake(False)
 
 
 def _wait_app_ready(timeout=30) -> bool:
