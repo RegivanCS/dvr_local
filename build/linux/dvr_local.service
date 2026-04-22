@@ -1,0 +1,24 @@
+[Unit]
+Description=DVR Local — Sistema de vigilância com câmeras IP
+After=network.target
+
+[Service]
+Type=simple
+User=dvr
+WorkingDirectory=/opt/dvr_local
+Environment=PYTHONIOENCODING=utf-8
+Environment=PATH=/opt/dvr_local/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+# Inicia todos os serviços via launcher
+ExecStart=/opt/dvr_local/.venv/bin/python dvr_launcher.py
+
+# Reinicia automaticamente se cair
+Restart=on-failure
+RestartSec=10
+
+# Logs vão para journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
