@@ -59,28 +59,23 @@ if not exist ".venv" (
     echo [1/5] Criando ambiente virtual...
     python -m venv .venv
 )
-call .venv\Scripts\activate.bat
+
+set VENV_PY=.venv\Scripts\python.exe
+set VENV_PIP=%VENV_PY% -m pip
 
 echo [2/5] Atualizando ferramentas de empacotamento...
-python -m pip install -q --upgrade pip setuptools wheel
+%VENV_PIP% install -q --upgrade pip setuptools wheel
 if errorlevel 1 (
     echo [AVISO] Falha ao atualizar pip/setuptools/wheel. Continuando...
 )
 
-echo [2/5] Instalando dependencias criticas do build...
-python -m pip install -q flask==3.1.0 requests==2.32.3 "Pillow>=10.0.0" opencv-python "pyinstaller>=6.0"
+echo [2/5] Instalando dependencias do build...
+%VENV_PIP% install -q -r build\windows\requirements-build.txt
 if errorlevel 1 (
-    echo ERRO: Falha ao instalar dependencias criticas (flask/requests/pillow/opencv/pyinstaller).
-    pause & exit /b 1
+    echo [AVISO] Algumas dependencias opcionais falharam (ex: pythonnet/pywebview). Continuando...
 )
 
-echo [2/5] Instalando dependencias opcionais (pywebview/pystray)...
-python -m pip install -q "pywebview>=5.0" "pystray>=0.19"
-if errorlevel 1 (
-    echo [AVISO] Dependencias opcionais nao puderam ser instaladas. O launcher usara fallback para browser.
-)
-
-python -c "import flask, requests, PIL, cv2; print('deps-ok')"
+%VENV_PY% -c "import flask, requests, PIL, cv2; print('deps-ok')"
 if errorlevel 1 (
     echo ERRO: Dependencias criticas nao estao importaveis no ambiente virtual.
     pause & exit /b 1
@@ -88,7 +83,7 @@ if errorlevel 1 (
 
 :: ── 3. Gerar executável com PyInstaller ─────────────────────────────────────
 echo [3/5] Compilando com PyInstaller...
-pyinstaller ^
+%VENV_PY% -m PyInstaller ^
     --name dvr_launcher ^
     --onedir ^
     --windowed ^
