@@ -18,7 +18,11 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── CONFIGURAÇÕES ───────────────────────────────────────────
-DVR_URL      = 'https://dvr.regivan.tec.br'
+# Detecta se está sendo usado localmente (localhost) ou remotamente
+# Use: python agent.py http://127.0.0.1:8000  (local)
+#   ou: python agent.py https://dvr.regivan.tec.br  (remoto)
+import sys
+DVR_URL      = sys.argv[1] if len(sys.argv) > 1 else os.getenv('DVR_URL', 'http://127.0.0.1:8000')
 DVR_USER     = 'admin'
 DVR_PASSWORD = '!Rede!123'           # senha do DVR app
 
@@ -36,6 +40,12 @@ HTTP_HEADERS    = {'User-Agent': 'Mozilla/5.0 (DVR-Agent/1.0)'}
 
 session = requests.Session()
 session.headers.update(HTTP_HEADERS)
+
+# Desabilita aviso de SSL para URLs remotas com certificado autoassinado
+if DVR_URL.startswith('https'):
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    session.verify = False
 
 def login():
     """Autentica no DVR remoto"""
