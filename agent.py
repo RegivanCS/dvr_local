@@ -1,12 +1,12 @@
 ﻿"""
-DVR Local Agent — roda na rede local onde estão as câmeras.
+DVR Local Agent - roda na rede local onde estão as cameras.
 Faz polling no servidor por comandos e executa scans localmente.
 
 Uso:
     python agent.py
 
 O agente aparece na tela de Scanner do DVR como "Agente conectado".
-Clique "Iniciar Scan" no browser — o agente escaneia a rede local
+Clique "Iniciar Scan" no browser - o agente escaneia a rede local
 e envia os resultados de volta ao servidor automaticamente.
 """
 import socket
@@ -17,8 +17,8 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ─── CONFIGURAÇÕES ───────────────────────────────────────────
-# Detecta se está sendo usado localmente (localhost) ou remotamente
+# --- CONFIGURAÇÕES -------------------------------------------
+# Detecta se esta sendo usado localmente (localhost) ou remotamente
 # Use: python agent.py http://127.0.0.1:8000  (local)
 #   ou: python agent.py https://dvr.regivan.tec.br  (remoto)
 import sys
@@ -30,9 +30,9 @@ AGENT_NAME   = socket.gethostname()   # identificador deste agente
 POLL_INTERVAL = 3                     # segundos entre polls
 
 CAM_USER     = 'admin'
-CAM_PASSWORD = ''
+CAM_PASSWORD = '!Rede!123'           # credenciais para as cameras (assumindo que todas usam as mesmas)
 CAM_MODEL    = 'generic'
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 CAMERA_PORTS    = [80, 8080, 8899, 554, 8081, 8090]
 CAMERA_KEYWORDS = ['camera', 'video', 'stream', 'dvr', 'ipcam', 'webcam', 'snapshot', 'cgi-bin']
@@ -50,16 +50,24 @@ if DVR_URL.startswith('https'):
 def login():
     """Autentica no DVR remoto"""
     try:
-        r = session.post(f'{DVR_URL}/login',
+        url = f'{DVR_URL}/login'
+        r = session.post(url,
                          data={'user': DVR_USER, 'password': DVR_PASSWORD, 'next': '/'},
-                         timeout=10, allow_redirects=True)
+                         timeout=10, allow_redirects=True, verify=False)
+        # Debug
+        print(f'[DEBUG] POST {url}')
+        print(f'[DEBUG] Status: {r.status_code}, URL final: {r.url}')
+        print(f'[DEBUG] Credenciais enviadas: user={repr(DVR_USER)}, pass={repr(DVR_PASSWORD)}')
         if '/login' in r.url:
-            print('✗ Falha no login. Verifique DVR_USER e DVR_PASSWORD.')
+            print('[X] Falha no login. Verifique DVR_USER e DVR_PASSWORD.')
+            print(f'[DEBUG] Resposta: {r.text[:200]}...')
             return False
-        print(f'✓ Login OK como {DVR_USER}')
+        print(f'[OK] Login OK como {DVR_USER}')
         return True
     except Exception as e:
-        print(f'✗ Erro ao conectar ao servidor: {e}')
+        print(f'[X] Erro ao conectar ao servidor: {e}')
+        import traceback
+        traceback.print_exc()
         return False
 
 def get_local_network():
@@ -98,11 +106,11 @@ def check_camera(ip, port):
     return None
 
 def do_scan():
-    """Executa scan na rede local e retorna lista de câmeras"""
+    """Executa scan na rede local e retorna lista de cameras"""
     local_ip, network = get_local_network()
     print(f'  Escaneando {network}.0/24...')
 
-    # Estágio 1: TCP
+    # Estagio 1: TCP
     open_endpoints = []
     with ThreadPoolExecutor(max_workers=300) as ex:
         futs = {ex.submit(tcp_open, f'{network}.{i}', p): (f'{network}.{i}', p)
@@ -112,7 +120,7 @@ def do_scan():
                 open_endpoints.append(futs[f])
     print(f'  {len(open_endpoints)} porta(s) abertas')
 
-    # Estágio 2: HTTP
+    # Estagio 2: HTTP
     cameras = []
     with ThreadPoolExecutor(max_workers=50) as ex:
         futs = [ex.submit(check_camera, ip, port) for ip, port in open_endpoints]
@@ -120,13 +128,13 @@ def do_scan():
             r = f.result()
             if r:
                 cameras.append(r)
-                print(f'  📹 {r["ip"]}:{r["port"]}')
+                print(f'  CAM {r["ip"]}:{r["port"]}')
 
-    print(f'  Total: {len(cameras)} câmera(s)')
+    print(f'  Total: {len(cameras)} camera(s)')
     return cameras, local_ip, network
 
 def send_heartbeat():
-    """Envia heartbeat ao servidor para indicar que o agente está vivo"""
+    """Envia heartbeat ao servidor para indicar que o agente esta vivo"""
     try:
         session.post(f'{DVR_URL}/api/agent/heartbeat',
                      json={'agent': AGENT_NAME},
@@ -135,7 +143,7 @@ def send_heartbeat():
         pass
 
 def poll_command():
-    """Verifica se há comando pendente no servidor"""
+    """Verifica se ha comando pendente no servidor"""
     try:
         r = session.get(f'{DVR_URL}/api/agent/command',
                         params={'agent': AGENT_NAME}, timeout=5)
@@ -157,15 +165,16 @@ def post_results(cameras, local_ip, network):
                              'cam_user': CAM_USER,
                              'cam_password': CAM_PASSWORD,
                              'cam_model': CAM_MODEL,
+                             'skip_test': True,
                          }, timeout=10)
         return r.json()
     except Exception as e:
-        print(f'  ✗ Erro ao enviar resultados: {e}')
+        print(f'  [X] Erro ao enviar resultados: {e}')
         return None
 
-# ── MAIN LOOP ─────────────────────────────────────────────────
+# -- MAIN LOOP -------------------------------------------------
 print('=' * 55)
-print('🤖 DVR Local Agent')
+print('>> DVR Local Agent')
 print(f'   Servidor : {DVR_URL}')
 print(f'   Host     : {AGENT_NAME}')
 print('=' * 55)
@@ -176,7 +185,7 @@ if not login():
 
 local_ip, network = get_local_network()
 print(f'\nRede local: {network}.0/24')
-print('Aguardando comandos do servidor... (Ctrl+C para parar)\n')
+print('Aguardando comandos do servidor... (Ctrl+C para parar)')
 
 scanning = False
 
@@ -187,7 +196,7 @@ try:
 
         if cmd == 'scan' and not scanning:
             scanning = True
-            print('\n▶ Comando de scan recebido!')
+            print('\n>> Comando de scan recebido!')
 
             def run_and_report():
                 global scanning
@@ -195,11 +204,11 @@ try:
                     cameras, lip, net = do_scan()
                     result = post_results(cameras, lip, net)
                     if result and result.get('registered'):
-                        print(f'  ✓ {result["registered"]} câmera(s) cadastrada(s) no DVR')
+                        print(f'  [OK] {result["registered"]} camera(s) cadastrada(s) no DVR')
                     else:
                         print(f'  → Resultado: {result}')
                 except Exception as e:
-                    print(f'  ✗ Erro no scan: {e}')
+                    print(f'  [X] Erro no scan: {e}')
                 finally:
                     scanning = False
 

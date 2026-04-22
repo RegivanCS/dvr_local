@@ -60,8 +60,11 @@ def _get_or_create_secret_key():
 
 app.secret_key = os.environ.get('DVR_SECRET_KEY', _get_or_create_secret_key())
 
-# Configurações de sessão para funcionar corretamente com HTTPS/Passenger
-app.config['SESSION_COOKIE_SECURE'] = True       # site é HTTPS, cookie deve ter flag Secure
+# Configurações de sessão
+# Em HTTP local, cookie Secure impede persistência de sessão (ex.: agent.py em 127.0.0.1:8000)
+# Use DVR_SESSION_COOKIE_SECURE=1 em produção HTTPS para forçar cookie seguro.
+_secure_env = os.environ.get('DVR_SESSION_COOKIE_SECURE', '').strip().lower()
+app.config['SESSION_COOKIE_SECURE'] = _secure_env in ('1', 'true', 'yes', 'on')
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_NAME'] = 'dvr_session'
@@ -500,6 +503,21 @@ def test_camera_connection(ip, port, user, password, model):
 
     return {'success': False, 'error': 'Nenhum path funcional encontrado'}
 
+
+def _build_camera_urls(ip, port, path, user='', password='', detected_url=''):
+    """Monta URLs derivadas da câmera respeitando câmeras HTTP e RTSP."""
+    port_str = str(port)
+    if path == 'rtsp://' or str(detected_url).startswith('rtsp://') or port_str == '554':
+        creds = ''
+        if user:
+            creds = f'{user}:{password}@' if password else f'{user}@'
+        stream_url = detected_url or f'rtsp://{creds}{ip}:{port_str}'
+        return '', stream_url
+
+    scheme = 'https' if port_str == '443' else 'http'
+    snapshot_url = f'{scheme}://{ip}:{port_str}{path}'
+    return snapshot_url, ''
+
 def gen_frames_from_camera(cam_id):
     """Captura frames da câmera usando IP/porta/path configurados na tela de configurações"""
     config = load_config()
@@ -672,8 +690,9 @@ def add_camera():
             return jsonify({'success': False, 'error': result.get('error')}), 400
         path = result['path']
 
-    _scheme = 'https' if str(data['port']) == '443' else 'http'
-    _snap_url = f"{_scheme}://{data['ip']}:{data['port']}{path}"
+    _snap_url, _stream_url = _build_camera_urls(
+        data['ip'], data['port'], path, data['user'], data['password']
+    )
     config['cameras'][cam_id] = {
         'name': data['name'],
         'ip': data['ip'],
@@ -683,6 +702,7 @@ def add_camera():
         'model': data['model'],
         'path': path,
         'snapshot_url': _snap_url,
+        'stream_url': _stream_url,
         'enabled': True,
         'created_at': datetime.now().isoformat()
     }
@@ -717,8 +737,9 @@ def edit_camera(cam_id):
             return jsonify({'success': False, 'error': result.get('error')}), 400
         path = result['path']
 
-    _scheme = 'https' if str(data['port']) == '443' else 'http'
-    _snap_url = f"{_scheme}://{data['ip']}:{data['port']}{path}"
+    _snap_url, _stream_url = _build_camera_urls(
+        data['ip'], data['port'], path, data['user'], data['password']
+    )
 
     # Atualizar câmera
     config['cameras'][cam_id].update({
@@ -730,6 +751,7 @@ def edit_camera(cam_id):
         'model': data['model'],
         'path': path,
         'snapshot_url': _snap_url,
+        'stream_url': _stream_url,
         'updated_at': datetime.now().isoformat()
     })
     
@@ -939,11 +961,23 @@ def agent_results():
     skip_test = data.get('skip_test', False)
 
     config = load_config()
+    deduped_cameras = {}
+    existing_by_endpoint = {}
+    for existing_id, existing_cam in config.get('cameras', {}).items():
+        endpoint_key = (str(existing_cam.get('ip', '')), str(existing_cam.get('port', '')))
+        if endpoint_key in existing_by_endpoint:
+            continue
+        existing_by_endpoint[endpoint_key] = existing_id
+        deduped_cameras[existing_id] = existing_cam
+    if len(deduped_cameras) != len(config.get('cameras', {})):
+        config['cameras'] = deduped_cameras
+
     registered = 0
     cam_ids = []
     for cam in cameras:
+        detected_url = cam.get('url', '')
         if skip_test:
-            path = cam.get('path', '/snapshot.cgi')
+            path = cam.get('path') or ('rtsp://' if str(detected_url).startswith('rtsp://') or str(cam.get('port')) == '554' else '/snapshot.cgi')
             success = True
         else:
             result  = test_camera_connection(cam['ip'], cam['port'], cam_user, cam_pass, cam_model)
@@ -951,7 +985,18 @@ def agent_results():
             path    = result.get('path', '/snapshot.cgi') if success else '/snapshot.cgi'
 
         if success:
-            cam_id = str(int(time.time() * 1000) + registered)
+            snapshot_url, stream_url = _build_camera_urls(
+                cam['ip'], cam['port'], path, cam_user, cam_pass, detected_url
+            )
+            endpoint_key = (str(cam['ip']), str(cam['port']))
+            cam_id = existing_by_endpoint.get(endpoint_key)
+            is_new = cam_id is None
+            if is_new:
+                cam_id = str(int(time.time() * 1000) + registered)
+                existing_by_endpoint[endpoint_key] = cam_id
+                config['cameras'][cam_id] = {}
+
+            created_at = config['cameras'][cam_id].get('created_at') or datetime.now().isoformat()
             config['cameras'][cam_id] = {
                 'name': f'Câmera ({cam["ip"]})',
                 'ip': cam['ip'],
@@ -960,14 +1005,18 @@ def agent_results():
                 'password': cam_pass,
                 'model': cam_model,
                 'path': path,
+                'snapshot_url': snapshot_url,
+                'stream_url': stream_url,
                 'enabled': True,
-                'created_at': datetime.now().isoformat(),
+                'created_at': created_at,
+                'updated_at': datetime.now().isoformat(),
             }
             cam_ids.append(cam_id)
-            registered += 1
-            time.sleep(0.001)  # garante IDs únicos
+            if is_new:
+                registered += 1
+                time.sleep(0.001)  # garante IDs únicos
 
-    if registered:
+    if cameras:
         save_config(config)
         logger.info(f"Agente cadastrou {registered} câmera(s)")
 
@@ -2606,14 +2655,21 @@ def api_cameras_list():
     cameras = config.get('cameras', {})
     result = []
     for cam_id, c in cameras.items():
+        snapshot_url = c.get('snapshot_url', '')
+        stream_url = c.get('stream_url', '')
+        if not snapshot_url and not stream_url:
+            snapshot_url, stream_url = _build_camera_urls(
+                c.get('ip', ''), c.get('port', 80), c.get('path', '/snapshot.cgi'),
+                c.get('user', ''), c.get('password', '')
+            )
         result.append({
             'id': cam_id,
             'name': c.get('name', cam_id),
             'ip': c.get('ip', ''),
             'port': c.get('port', 80),
             'enabled': c.get('enabled', True),
-            'snapshot_url': c.get('snapshot_url', ''),
-            'stream_url': c.get('stream_url', ''),
+            'snapshot_url': snapshot_url,
+            'stream_url': stream_url,
         })
     return jsonify({'cameras': result})
 
