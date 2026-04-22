@@ -3,10 +3,39 @@ setlocal
 cd /d "%~dp0..\.."
 chcp 65001 >nul
 
+set ICON_FILE=build\windows\assets\dvr_icon.ico
+set ISS_FILE=build\windows\installer.iss
+
 echo ============================================
 echo   DVR Local — Build Windows v1.1
 echo ============================================
 echo.
+
+:: ── 0. Pré-validações de arquivos obrigatórios ──────────────────────────────
+if not exist "%ISS_FILE%" (
+    echo ERRO: Arquivo do Inno Setup nao encontrado: %ISS_FILE%
+    pause & exit /b 1
+)
+
+for %%f in (dvr_launcher.py app.py rtsp_proxy.py tunnel_relay.py motion_recorder.py recordings_relay.py requirements.txt) do (
+    if not exist "%%f" (
+        echo ERRO: Arquivo obrigatorio ausente: %%f
+        pause & exit /b 1
+    )
+)
+
+if not exist "build\windows\assets" mkdir "build\windows\assets"
+
+:: Fallback: gera um .ico simples caso o icone oficial nao exista.
+if not exist "%ICON_FILE%" (
+    echo [INFO] Icone nao encontrado. Gerando fallback em %ICON_FILE% ...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Drawing; $bmp = New-Object System.Drawing.Bitmap 256,256; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode='HighQuality'; $g.Clear([System.Drawing.Color]::FromArgb(24,24,24)); $bg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(76,175,80)); $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(200,255,200),8); $g.FillRectangle($bg,28,70,150,110); $g.DrawRectangle($pen,28,70,150,110); $poly = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(56,142,60)); $pts = @((New-Object System.Drawing.Point 178,86),(New-Object System.Drawing.Point 232,62),(New-Object System.Drawing.Point 232,188),(New-Object System.Drawing.Point 178,164)); $g.FillPolygon($poly,$pts); $l1 = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(20,20,20)); $l2 = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(129,199,132)); $g.FillEllipse($l1,62,100,70,70); $g.FillEllipse($l2,80,118,34,34); $hIcon = $bmp.GetHicon(); $icon = [System.Drawing.Icon]::FromHandle($hIcon); $fs = [System.IO.File]::Create('%ICON_FILE%'); $icon.Save($fs); $fs.Close(); $g.Dispose(); $bmp.Dispose(); [System.Runtime.InteropServices.Marshal]::Release($hIcon) | Out-Null"
+)
+
+if not exist "%ICON_FILE%" (
+    echo ERRO: Falha ao criar/obter icone em %ICON_FILE%
+    pause & exit /b 1
+)
 
 :: ── 1. Verificar Python ──────────────────────────────────────────────────────
 where python >nul 2>&1
@@ -16,6 +45,15 @@ if errorlevel 1 (
 )
 echo [OK] Python encontrado.
 
+:: Valida versao minima do Python (3.11+)
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)"
+if errorlevel 1 (
+    echo ERRO: Python 3.11+ necessario para este build.
+    python --version
+    pause & exit /b 1
+)
+echo [OK] Python 3.11+ confirmado.
+
 :: ── 2. Criar/atualizar ambiente virtual ─────────────────────────────────────
 if not exist ".venv" (
     echo [1/5] Criando ambiente virtual...
@@ -23,9 +61,30 @@ if not exist ".venv" (
 )
 call .venv\Scripts\activate.bat
 
-echo [2/5] Instalando dependências...
-pip install -q -r requirements.txt
-pip install -q pyinstaller
+echo [2/5] Atualizando ferramentas de empacotamento...
+python -m pip install -q --upgrade pip setuptools wheel
+if errorlevel 1 (
+    echo [AVISO] Falha ao atualizar pip/setuptools/wheel. Continuando...
+)
+
+echo [2/5] Instalando dependencias criticas do build...
+python -m pip install -q flask==3.1.0 requests==2.32.3 Pillow>=10.0.0 opencv-python pyinstaller>=6.0
+if errorlevel 1 (
+    echo ERRO: Falha ao instalar dependencias criticas (flask/requests/pillow/opencv/pyinstaller).
+    pause & exit /b 1
+)
+
+echo [2/5] Instalando dependencias opcionais (pywebview/pystray)...
+python -m pip install -q pywebview>=5.0 pystray>=0.19
+if errorlevel 1 (
+    echo [AVISO] Dependencias opcionais nao puderam ser instaladas. O launcher usara fallback para browser.
+)
+
+python -c "import flask, requests, PIL, cv2; print('deps-ok')"
+if errorlevel 1 (
+    echo ERRO: Dependencias criticas nao estao importaveis no ambiente virtual.
+    pause & exit /b 1
+)
 
 :: ── 3. Gerar executável com PyInstaller ─────────────────────────────────────
 echo [3/5] Compilando com PyInstaller...
@@ -33,7 +92,7 @@ pyinstaller ^
     --name dvr_launcher ^
     --onedir ^
     --windowed ^
-    --icon build\windows\assets\dvr_icon.ico ^
+    --icon %ICON_FILE% ^
     --add-data "app.py;." ^
     --add-data "rtsp_proxy.py;." ^
     --add-data "tunnel_relay.py;." ^
@@ -41,16 +100,18 @@ pyinstaller ^
     --add-data "recordings_relay.py;." ^
     --add-data "cameras_config.json;." ^
     --add-data "requirements.txt;." ^
-    --hidden-import flask ^
     --hidden-import webview ^
     --hidden-import pystray ^
     --hidden-import PIL ^
-    --hidden-import cv2 ^
     --noconfirm ^
     dvr_launcher.py
 
 if errorlevel 1 (
     echo ERRO: PyInstaller falhou.
+    pause & exit /b 1
+)
+if not exist "dist\dvr_launcher\dvr_launcher.exe" (
+    echo ERRO: Executavel nao encontrado apos PyInstaller: dist\dvr_launcher\dvr_launcher.exe
     pause & exit /b 1
 )
 echo [OK] Executável gerado em dist\dvr_launcher\
@@ -74,7 +135,15 @@ for %%p in (
 )
 
 if defined ISCC (
-    %ISCC% build\windows\installer.iss
+    %ISCC% %ISS_FILE%
+    if errorlevel 1 (
+        echo ERRO: Inno Setup falhou ao compilar %ISS_FILE%
+        pause & exit /b 1
+    )
+    if not exist "dist\DVR_Local_Setup_v1.1.exe" (
+        echo ERRO: Instalador nao encontrado em dist\DVR_Local_Setup_v1.1.exe
+        pause & exit /b 1
+    )
     echo [OK] Instalador gerado em dist\DVR_Local_Setup_v1.1.exe
 ) else (
     echo [AVISO] Inno Setup não encontrado. Instale em: https://jrsoftware.org/isinfo.php
