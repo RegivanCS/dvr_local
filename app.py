@@ -615,7 +615,23 @@ def index():
             """
     
     if not camera_boxes:
-        camera_boxes = '<div style="grid-column: 1/-1; text-align: center; color: #fff;"><h2>⚠️ Nenhuma câmera ativa</h2><p>Configure câmeras na <a href="/cameras" style="color: #4CAF50;">página de configuração</a></p></div>'
+        camera_boxes = '''
+        <div style="grid-column: 1/-1; padding: 30px; text-align: center; color: #fff; background: rgba(255,152,0,0.15); border: 2px solid #ff9800; border-radius: 12px; margin: 20px 0;">
+            <h2>⚠️ Nenhuma câmera detectada</h2>
+            <p style="margin: 15px 0;">Para encontrar câmeras automaticamente na rede local:</p>
+            <ol style="text-align: left; display: inline-block; margin: 20px 0;">
+                <li>Abra um terminal/PowerShell na rede das câmeras</li>
+                <li>Execute: <code style="background: rgba(0,0,0,0.3); padding: 5px 10px; border-radius: 4px;">python agent.py</code></li>
+                <li>Volte aqui e clique no botão abaixo</li>
+            </ol>
+            <p style="margin-top: 20px;">
+                <a href="/scan" class="btn" style="background: #ff9800; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; display: inline-block; margin-top: 10px;">
+                    🔍 Buscar Câmeras Agora
+                </a>
+            </p>
+            <p style="font-size: 0.85em; opacity: 0.7; margin-top: 15px;">Ou configure câmeras manualmente em <a href="/cameras" style="color: #4CAF50;">⚙️ Configurar</a></p>
+        </div>
+        '''
     
     return render_template_string(INDEX_TEMPLATE, camera_boxes=camera_boxes)
 
@@ -882,6 +898,21 @@ def agent_trigger():
         return jsonify({'success': False, 'error': 'Agente não encontrado'}), 404
     _agent_state[name]['command'] = 'scan'
     return jsonify({'success': True})
+
+@app.route('/api/agents/status')
+@login_required
+def agents_status():
+    """Retorna lista de agentes ativos (heartbeat nos últimos 30s)"""
+    now = time.time()
+    active_agents = [
+        name for name, state in _agent_state.items()
+        if now - state.get('last_seen', 0) < 30
+    ]
+    return jsonify({
+        'connected': len(active_agents) > 0,
+        'agents': active_agents,
+        'count': len(active_agents)
+    })
 
 @app.route('/api/agent/list')
 @login_required
@@ -1939,6 +1970,31 @@ INDEX_TEMPLATE = """
         }, 30000);
         refreshMotionAllState();
         setInterval(refreshMotionAllState, 12000);
+
+        // === Auto-descobrimento de agentes e câmeras ===
+        async function checkAgentsAndAutoScan() {
+            try {
+                const r = await fetch('/api/agents/status');
+                const data = await r.json();
+                if (!data.connected) return; // Sem agentes, não fazer nada
+                
+                const camCount = document.querySelectorAll('.camera-box').length;
+                if (camCount === 0 && data.agents.length > 0) {
+                    // Agente conectado mas sem câmeras — iniciar scan automático
+                    console.log('[DVR] Agente detectado com', data.agents, '- iniciando scan auto...');
+                    try {
+                        await fetch('/api/agent/trigger', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({agent: data.agents[0]})
+                        });
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+        // Checa agentes a cada 15 segundos
+        checkAgentsAndAutoScan();
+        setInterval(checkAgentsAndAutoScan, 15000);
     </script>
 </body>
 </html>
