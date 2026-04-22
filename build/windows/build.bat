@@ -68,14 +68,14 @@ if errorlevel 1 (
 )
 
 echo [2/5] Instalando dependencias criticas do build...
-python -m pip install -q flask==3.1.0 requests==2.32.3 Pillow>=10.0.0 opencv-python pyinstaller>=6.0
+python -m pip install -q flask==3.1.0 requests==2.32.3 "Pillow>=10.0.0" opencv-python "pyinstaller>=6.0"
 if errorlevel 1 (
     echo ERRO: Falha ao instalar dependencias criticas (flask/requests/pillow/opencv/pyinstaller).
     pause & exit /b 1
 )
 
 echo [2/5] Instalando dependencias opcionais (pywebview/pystray)...
-python -m pip install -q pywebview>=5.0 pystray>=0.19
+python -m pip install -q "pywebview>=5.0" "pystray>=0.19"
 if errorlevel 1 (
     echo [AVISO] Dependencias opcionais nao puderam ser instaladas. O launcher usara fallback para browser.
 )
