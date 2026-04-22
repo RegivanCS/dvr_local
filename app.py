@@ -1846,6 +1846,48 @@ INDEX_TEMPLATE = """
         const _LOCAL_HOSTS = ['localhost', '127.0.0.1', '::1'];
         const REMOTE_VIEW_MODE = !_LOCAL_HOSTS.includes(window.location.hostname);
 
+        function _remoteProfile(kind = 'grid') {
+            const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            const effective = (conn && conn.effectiveType) ? conn.effectiveType : '';
+            const downlink = (conn && typeof conn.downlink === 'number') ? conn.downlink : null;
+            const camCount = Math.max(1, document.querySelectorAll('.camera-box img').length);
+
+            let minMs = kind === 'fs' ? 80 : 95;
+            let maxMs = kind === 'fs' ? 220 : 260;
+            let firstMs = kind === 'fs' ? 110 : 130;
+            let failMs = kind === 'fs' ? 320 : 360;
+
+            if (effective === '2g' || effective === 'slow-2g') {
+                minMs += 90; maxMs += 180; firstMs += 120; failMs += 220;
+            } else if (effective === '3g') {
+                minMs += 45; maxMs += 90; firstMs += 60; failMs += 90;
+            }
+
+            if (downlink !== null) {
+                if (downlink < 1.2) {
+                    minMs += 80; maxMs += 140; firstMs += 110;
+                } else if (downlink < 3.0) {
+                    minMs += 30; maxMs += 60; firstMs += 40;
+                }
+            }
+
+            if (kind === 'grid' && camCount > 1) {
+                const factor = Math.min(1.8, 1 + (camCount - 1) * 0.12);
+                minMs = Math.round(minMs * factor);
+                maxMs = Math.round(maxMs * factor);
+                firstMs = Math.round(firstMs * factor);
+            }
+
+            if (document.hidden) {
+                minMs = Math.max(minMs, 450);
+                maxMs = Math.max(maxMs, 900);
+                firstMs = Math.max(firstMs, 550);
+                failMs = Math.max(failMs, 1000);
+            }
+
+            return { minMs, maxMs, firstMs, failMs };
+        }
+
         function _startRemoteImageLoop(img, baseUrl, opts = {}) {
             const minMs = opts.minMs ?? 90;
             const maxMs = opts.maxMs ?? 280;
@@ -1921,12 +1963,7 @@ INDEX_TEMPLATE = """
             document.querySelectorAll('.camera-box img').forEach(img => {
                 const snapshotSrc = (img.dataset.snapshotSrc || img.getAttribute('src') || '').split('?')[0];
                 if (!snapshotSrc) return;
-                const stop = _startRemoteImageLoop(img, snapshotSrc, {
-                    minMs: 95,
-                    maxMs: 260,
-                    firstMs: 130,
-                    failMs: 360,
-                });
+                const stop = _startRemoteImageLoop(img, snapshotSrc, _remoteProfile('grid'));
                 _remoteGridLoops.set(img.id || snapshotSrc, stop);
             });
         }
@@ -2130,12 +2167,7 @@ INDEX_TEMPLATE = """
             if (REMOTE_VIEW_MODE) {
                 const snapBase = '/api/camera/' + camId + '/snapshot_img';
                 fsImg.src = snapBase + '?t=' + Date.now();
-                _remoteFsStop = _startRemoteImageLoop(fsImg, snapBase, {
-                    minMs: 80,
-                    maxMs: 220,
-                    firstMs: 110,
-                    failMs: 320,
-                });
+                _remoteFsStop = _startRemoteImageLoop(fsImg, snapBase, _remoteProfile('fs'));
             } else {
                 fsImg.src = '/camera/' + camId;
             }
@@ -2158,6 +2190,23 @@ INDEX_TEMPLATE = """
         });
         _setCameraGridMode();
         _startGridSnapshotPolling();
+        if (REMOTE_VIEW_MODE) {
+            document.addEventListener('visibilitychange', () => {
+                _startGridSnapshotPolling();
+                if (currentCam && document.getElementById('fullscreen').classList.contains('active')) {
+                    openFullscreen(currentCam);
+                }
+            });
+            const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (conn && typeof conn.addEventListener === 'function') {
+                conn.addEventListener('change', () => {
+                    _startGridSnapshotPolling();
+                    if (currentCam && document.getElementById('fullscreen').classList.contains('active')) {
+                        openFullscreen(currentCam);
+                    }
+                });
+            }
+        }
         refreshMotionAllState();
         setInterval(refreshMotionAllState, 12000);
 
