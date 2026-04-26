@@ -5,6 +5,8 @@ chcp 65001 >nul
 
 set ICON_FILE=build\windows\assets\dvr_icon.ico
 set ISS_FILE=build\windows\installer.iss
+set REQ_BUILD_CORE=build\windows\requirements-build-core.txt
+set REQ_BUILD_OPTIONAL=build\windows\requirements-build-optional.txt
 
 echo ============================================
 echo   DVR Local — Build Windows v1.1
@@ -20,6 +22,13 @@ if not exist "%ISS_FILE%" (
 for %%f in (dvr_launcher.py app.py rtsp_proxy.py tunnel_relay.py motion_recorder.py recordings_relay.py requirements.txt) do (
     if not exist "%%f" (
         echo ERRO: Arquivo obrigatorio ausente: %%f
+        pause & exit /b 1
+    )
+)
+
+for %%f in (%REQ_BUILD_CORE% %REQ_BUILD_OPTIONAL%) do (
+    if not exist "%%f" (
+        echo ERRO: Arquivo de requisitos do build ausente: %%f
         pause & exit /b 1
     )
 )
@@ -69,10 +78,17 @@ if errorlevel 1 (
     echo [AVISO] Falha ao atualizar pip/setuptools/wheel. Continuando...
 )
 
-echo [2/5] Instalando dependencias do build...
-%VENV_PIP% install -q -r build\windows\requirements-build.txt
+echo [2/5] Instalando dependencias criticas do build...
+%VENV_PIP% install -q -r %REQ_BUILD_CORE%
 if errorlevel 1 (
-    echo [AVISO] Algumas dependencias opcionais falharam (ex: pythonnet/pywebview). Continuando...
+    echo ERRO: Falha ao instalar dependencias criticas do build.
+    pause & exit /b 1
+)
+
+echo [2/5] Instalando dependencias opcionais do build...
+%VENV_PIP% install -q -r %REQ_BUILD_OPTIONAL%
+if errorlevel 1 (
+    echo [AVISO] Algumas dependencias opcionais falharam, por exemplo pythonnet ou pywebview. Continuando...
 )
 
 %VENV_PY% -c "import flask, requests, PIL, cv2; print('deps-ok')"
@@ -151,4 +167,3 @@ echo   Build concluído!
 echo   Portátil:   dist\dvr_launcher\dvr_launcher.exe
 if defined ISCC echo   Instalador: dist\DVR_Local_Setup_v1.1.exe
 echo ============================================
-pause

@@ -1,35 +1,35 @@
 {
   "cameras": {
-    "1777232101214": {
+    "1777239455850": {
       "name": "Câmera 1 (192.168.1.5)",
-      "ip": "omaha-korea-oral-burner.trycloudflare.com",
+      "ip": "weeks-somewhat-transcript-animated.trycloudflare.com",
       "port": "443",
       "user": "admin",
       "password": "",
       "model": "generic",
       "path": "/snapshot.jpg",
-      "snapshot_url": "https://omaha-korea-oral-burner.trycloudflare.com:443/snapshot.jpg",
-      "stream_url": "",
       "enabled": true,
-      "created_at": "2026-04-26T16:35:01.214599"
+      "snapshot_url": "https://weeks-somewhat-transcript-animated.trycloudflare.com:443/snapshot.jpg",
+      "stream_url": "",
+      "updated_at": "2026-04-26T18:39:54.438390"
     },
-    "1777232101221": {
+    "1777239455851": {
       "name": "Câmera 2 (192.168.1.6)",
-      "ip": "incurred-oasis-slowly-reply.trycloudflare.com",
+      "ip": "structured-madonna-hearing-input.trycloudflare.com",
       "port": "443",
       "user": "admin",
       "password": "",
       "model": "generic",
       "path": "/snapshot.jpg",
-      "snapshot_url": "https://incurred-oasis-slowly-reply.trycloudflare.com:443/snapshot.jpg",
-      "stream_url": "",
       "enabled": true,
-      "created_at": "2026-04-26T16:35:01.221444"
+      "snapshot_url": "https://structured-madonna-hearing-input.trycloudflare.com:443/snapshot.jpg",
+      "stream_url": "",
+      "updated_at": "2026-04-26T18:39:54.463938"
     }
   },
   "auth": {
     "user": "admin",
     "password": "!Rede!123"
   },
-  "recordings_tunnel_url": "https://specifies-hourly-concerns-voters.trycloudflare.com"
+  "recordings_tunnel_url": "https://salvation-player-freight-value.trycloudflare.com"
 }

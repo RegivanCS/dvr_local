@@ -87,38 +87,70 @@ def start_tunnel(cloudflared, cam, result_dict):
     )
     result_dict['proc'] = proc
     url_pattern = re.compile(r'https://[a-z0-9\-]+\.trycloudflare\.com')
-    for line in proc.stdout:
-        m = url_pattern.search(line)
-        if m:
-            result_dict['url'] = m.group(0)
-            print(f'  ✓ Tunnel ativo: {local_url} → {result_dict["url"]}')
-            break
-    # Continua lendo stdout para manter o processo vivo
-    for _ in proc.stdout:
-        pass
-    result_dict['url'] = None  # sinaliza que o tunnel caiu
+    url_found = None
+    for line in iter(proc.stdout.readline, ''):
+        stripped = line.strip()
+        if stripped:
+            m = url_pattern.search(stripped)
+            if m and 'api.' not in stripped:
+                url_found = m.group(0)
+                result_dict['url'] = url_found
+                print(f'  Tunnel ativo: {local_url} -> {url_found}')
+                break
+    if url_found:
+        # Mantem o tunnel vivo lendo stdout ate o processo morrer
+        for _ in proc.stdout:
+            pass
+    else:
+        print(f'  Tunnel {local_url} nao gerou URL valida')
+    # Se chegou aqui, o processo morreu
+    if not url_found:
+        result_dict['url'] = None
 
 
-def login_dvr():
+def login_dvr(only_local=False):
     global DVR_URL
     s = requests.Session()
     s.headers.update(HTTP_HEADERS)
-    for url in [DVR_URL_LOCAL, DVR_URL_REMOTE]:
+    # Sempre tenta local primeiro
+    try:
+        r = s.post(f'{DVR_URL_LOCAL}/login', data={
+            'user': DVR_USER, 'password': DVR_PASSWORD, 'next': '/'
+        }, allow_redirects=True, timeout=10)
+        if '/login' not in r.url:
+            DVR_URL = DVR_URL_LOCAL
+            print(f'Login no DVR local OK ({DVR_URL_LOCAL})')
+            return s
+    except Exception as e:
+        print(f'  DVR local: {e}')
+    # Tenta remoto se nao for only_local
+    if not only_local:
         try:
-            r = s.post(f'{url}/login', data={
+            r = s.post(f'{DVR_URL_REMOTE}/login', data={
                 'user': DVR_USER, 'password': DVR_PASSWORD, 'next': '/'
             }, allow_redirects=True, timeout=10)
             if '/login' not in r.url:
-                if DVR_URL != url:
-                    print(f'  ℹ️  Usando DVR: {url}')
-                    DVR_URL = url
-                print(f'✓ Login no DVR OK ({url})')
+                DVR_URL = DVR_URL_REMOTE
+                print(f'Login no DVR remoto OK ({DVR_URL_REMOTE})')
                 return s
-            else:
-                print(f'  ✗ Credenciais inválidas em {url}')
         except Exception as e:
-            print(f'  ⚠️  DVR inacessível em {url}: {e}')
-    print('✗ Nenhum DVR disponível.')
+            print(f'  DVR remoto: {e}')
+    print('Nenhum DVR disponivel.')
+    return None
+
+def _login_remote():
+    """Tenta login APENAS no DVR remoto."""
+    s = requests.Session()
+    s.headers.update(HTTP_HEADERS)
+    try:
+        r = s.post(f'{DVR_URL_REMOTE}/login', data={
+            'user': DVR_USER, 'password': DVR_PASSWORD, 'next': '/'
+        }, allow_redirects=True, timeout=10)
+        if '/login' not in r.url:
+            print(f'Login remoto OK ({DVR_URL_REMOTE})')
+            return s
+    except Exception as e:
+        print(f'Remoto inacessivel: {e}')
     return None
 
 
@@ -178,7 +210,16 @@ def register_tunnel_camera(session, cam, tunnel_url):
         print(f'  ✓ DVR atualizado! ID: {cam_id}')
     else:
         print(f'  ✗ Falha no DVR: {result.get("error")}')
-
+        # Tambem tenta cadastrar no remoto
+    try:
+        remote_s = _login_remote()
+        if remote_s:
+            r = remote_s.post(f'{DVR_URL_REMOTE}/api/camera/add', data=data, timeout=15)
+            result = r.json()
+            if result.get('success'):
+                print(f'  DVR remoto atualizado! ID: {result.get("cam_id")}')
+    except Exception as e:
+        print(f'  Falha no DVR remoto: {e}')
 
 def list_dvr_cameras(session):
     """Retorna lista de câmeras cadastradas no DVR."""
@@ -253,6 +294,20 @@ def ensure_cameras_healthy(session, active_pairs):
 
         if not changed:
             print(f'  • {expected_name}: OK')
+
+
+def keepalive_tunnels(active_pairs):
+    """Faz ping nos tunnels ativos para mantê-los vivos."""
+    for cam, tunnel_url in active_pairs:
+        try:
+            # Faz uma requisição GET simples para manter o tunnel ativo
+            response = requests.get(tunnel_url, timeout=5)
+            if response.status_code == 200:
+                print(f'  ✓ Keep-alive: {cam["name"]} pingado')
+            else:
+                print(f'  ⚠️  Keep-alive: {cam["name"]} status {response.status_code}')
+        except Exception as e:
+            print(f'  ⚠️  Keep-alive: {cam["name"]} erro: {e}')
 
 
 # ── MAIN ─────────────────────────────────────

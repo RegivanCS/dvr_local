@@ -55,12 +55,12 @@ def capture_loop(cam):
     """Captura frames em loop contínuo via ffmpeg streaming (processo único, sem reiniciar a cada frame)."""
     url = rtsp_url(cam)
     key = f'{cam["ip"]}:{cam["rtsp_port"]}'
-    print(f'  📷 Capturando: {url}')
+    print(f'  📷 Capturando: {url} (ou gerando imagem de teste se falhar)')
 
     while True:
         proc = None
         try:
-            # Processo ffmpeg persistente: lê o stream RTSP e gera ~5 JPEGs/s continuamente
+            # Tenta ffmpeg primeiro
             proc = subprocess.Popen(
                 [
                     FFMPEG,
@@ -77,14 +77,16 @@ def capture_loop(cam):
                 stderr=subprocess.DEVNULL,
             )
 
+            # Se conseguiu iniciar o ffmpeg, tenta ler frames
             buf = b''
-            while True:
+            frame_count = 0
+            while frame_count < 5:  # Tenta ler alguns frames
                 chunk = proc.stdout.read(65536)
                 if not chunk:
-                    break  # ffmpeg encerrou — reconecta
+                    break  # ffmpeg encerrou
                 buf += chunk
 
-                # Extrai todos os frames JPEG completos do buffer
+                # Extrai frames JPEG
                 while True:
                     start = buf.find(b'\xff\xd8')
                     if start == -1:
@@ -92,7 +94,6 @@ def capture_loop(cam):
                         break
                     end = buf.find(b'\xff\xd9', start + 2)
                     if end == -1:
-                        # Frame incompleto — aguarda mais dados
                         buf = buf[start:]
                         break
                     frame = buf[start:end + 2]
@@ -100,9 +101,41 @@ def capture_loop(cam):
                     with _lock:
                         _frames[key] = frame
                         _frame_ts[key] = time.time()
+                    frame_count += 1
+                    if frame_count >= 1:  # Já temos pelo menos 1 frame
+                        break
+
+            if frame_count > 0:
+                print(f'  ✓ RTSP OK: {frame_count} frames capturados de {key}')
+                # Continua capturando em loop
+                while True:
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while True:
+                        start = buf.find(b'\xff\xd8')
+                        if start == -1:
+                            buf = b''
+                            break
+                        end = buf.find(b'\xff\xd9', start + 2)
+                        if end == -1:
+                            buf = buf[start:]
+                            break
+                        frame = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        with _lock:
+                            _frames[key] = frame
+                            _frame_ts[key] = time.time()
+            else:
+                # RTSP falhou, gera imagem de teste
+                print(f'  ⚠️  RTSP falhou para {key}, gerando imagem de teste')
+                generate_test_image(key)
 
         except Exception as e:
             print(f'  ⚠️  Erro captura {key}: {e}')
+            # Gera imagem de teste como fallback
+            generate_test_image(key)
         finally:
             if proc:
                 try:
@@ -112,7 +145,36 @@ def capture_loop(cam):
                     pass
 
         print(f'  🔄 Reconectando câmera {key}...')
-        time.sleep(2)  # Aguarda antes de reconectar
+        time.sleep(5)  # Aguarda antes de reconectar
+
+
+def generate_test_image(key):
+    """Gera uma imagem de teste simples quando a câmera real não está disponível."""
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+
+    # Cria uma imagem simples
+    img = Image.new('RGB', (640, 480), color=(64, 64, 64))
+    draw = ImageDraw.Draw(img)
+
+    # Texto na imagem
+    text = f"TESTE\n{key}\n{time.strftime('%H:%M:%S')}"
+    try:
+        # Tenta usar uma fonte, se não conseguir usa default
+        draw.text((320, 240), text, fill=(255, 255, 255), anchor="mm")
+    except:
+        draw.text((320, 240), text, fill=(255, 255, 255))
+
+    # Converte para JPEG
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=80)
+    jpeg_data = buf.getvalue()
+
+    with _lock:
+        _frames[key] = jpeg_data
+        _frame_ts[key] = time.time()
+
+    print(f'  🖼️  Imagem de teste gerada para {key}')
 
 
 def make_handler(cam):
