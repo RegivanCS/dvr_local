@@ -1422,6 +1422,41 @@ def _parse_recording(fname):
     return None
 
 
+def _find_matching_snapshot(cam_id, video_filename):
+    """Encontra snapshot próximo (±5min) do vídeo para usar como preview"""
+    try:
+        # Parse tempo do vídeo
+        dt = _parse_recording(video_filename)
+        if not dt:
+            return None
+        
+        snap_dir = os.path.join(SNAPSHOTS_DIR, cam_id)
+        if not os.path.isdir(snap_dir):
+            return None
+        
+        best_snap = None
+        min_diff = 5 * 60  # 5 minutos em segundos
+        
+        for snap_fname in os.listdir(snap_dir):
+            if not snap_fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                continue
+            
+            snap_dt = _parse_recording(snap_fname)
+            if not snap_dt:
+                continue
+            
+            # Calcula diferença de tempo
+            diff = abs((snap_dt - dt).total_seconds())
+            
+            if diff < min_diff:
+                min_diff = diff
+                best_snap = snap_fname
+        
+        return best_snap
+    except Exception as e:
+        logger.debug(f'Erro ao encontrar snapshot: {e}')
+        return None
+
 @app.route('/recordings')
 @login_required
 def recordings_page():
@@ -1457,7 +1492,13 @@ def recordings_page():
             size_b   = os.path.getsize(fp) if os.path.isfile(fp) else 0
             size_s   = f'{size_b/1024/1024:.1f} MB' if size_b > 1024*1024 else f'{size_b//1024} KB'
             is_video = fname.lower().endswith(('.mp4', '.avi'))
-            item = {'fname': fname, 'label': label, 'size': size_s, 'is_video': is_video}
+            
+            # Encontra snapshot para preview se for vídeo
+            snapshot_preview = None
+            if is_video:
+                snapshot_preview = _find_matching_snapshot(cam_id, fname)
+            
+            item = {'fname': fname, 'label': label, 'size': size_s, 'is_video': is_video, 'snapshot_preview': snapshot_preview}
             by_date.setdefault(date_str, {}).setdefault(hour, []).append(item)
         # ordenar horas desc dentro de cada data
         for d in by_date:
@@ -1617,7 +1658,12 @@ a{color:inherit;text-decoration:none}
                 <div class="clip"
                      onclick="playVideo('/recordings/{{ cam_id }}/{{ item.fname }}','{{ item.label }}','/recordings/{{ cam_id }}/{{ item.fname }}')">
                   <div class="clip-thumb">
+                    {% if item.snapshot_preview %}
+                    <img src="/recordings/{{ cam_id }}/{{ item.snapshot_preview }}" 
+                         alt="preview" style="width:100%;height:100%;object-fit:cover;">
+                    {% else %}
                     <div style="color:#546e7a;font-size:2em">&#x1F3AC;</div>
+                    {% endif %}
                     <div class="clip-play">&#x25B6;</div>
                   </div>
                   <div class="clip-info">
