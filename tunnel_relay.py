@@ -29,7 +29,10 @@ if hasattr(sys.stderr, 'reconfigure'):
 # ─────────────────────────────────────────────
 # CONFIGURAÇÕES
 # ─────────────────────────────────────────────
-DVR_URL      = 'https://dvr.regivan.tec.br'
+# Tenta DVR local primeiro; se offline, tenta o remoto
+DVR_URL_LOCAL  = 'http://127.0.0.1:8000'
+DVR_URL_REMOTE = 'https://dvr.regivan.tec.br'
+DVR_URL        = DVR_URL_LOCAL   # padrão: local
 DVR_USER     = 'admin'
 DVR_PASSWORD = '!Rede!123'
 
@@ -46,6 +49,7 @@ CAMERAS = [
 
 HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (DVR-Camera-Viewer/1.0)'}
 MONITOR_INTERVAL = 60
+KEEPALIVE_INTERVAL = 25  # segundos entre pings para manter tunnel ativo
 # ─────────────────────────────────────────────
 
 CLOUDFLARED_URL = (
@@ -92,19 +96,30 @@ def start_tunnel(cloudflared, cam, result_dict):
     # Continua lendo stdout para manter o processo vivo
     for _ in proc.stdout:
         pass
+    result_dict['url'] = None  # sinaliza que o tunnel caiu
 
 
 def login_dvr():
+    global DVR_URL
     s = requests.Session()
     s.headers.update(HTTP_HEADERS)
-    r = s.post(f'{DVR_URL}/login', data={
-        'user': DVR_USER, 'password': DVR_PASSWORD, 'next': '/'
-    }, allow_redirects=True, timeout=10)
-    if '/login' in r.url:
-        print('✗ Falha no login do DVR.')
-        return None
-    print('✓ Login no DVR OK')
-    return s
+    for url in [DVR_URL_LOCAL, DVR_URL_REMOTE]:
+        try:
+            r = s.post(f'{url}/login', data={
+                'user': DVR_USER, 'password': DVR_PASSWORD, 'next': '/'
+            }, allow_redirects=True, timeout=10)
+            if '/login' not in r.url:
+                if DVR_URL != url:
+                    print(f'  ℹ️  Usando DVR: {url}')
+                    DVR_URL = url
+                print(f'✓ Login no DVR OK ({url})')
+                return s
+            else:
+                print(f'  ✗ Credenciais inválidas em {url}')
+        except Exception as e:
+            print(f'  ⚠️  DVR inacessível em {url}: {e}')
+    print('✗ Nenhum DVR disponível.')
+    return None
 
 
 def clear_all_cameras(session):
@@ -294,15 +309,59 @@ else:
 
 try:
     last_monitor = 0
+    last_keepalive = 0
     while True:
         now = time.time()
+
+        # ── Watchdog: reinicia tunnels caídos ──────────────────────────
+        for i, (cam, tun) in enumerate(zip(CAMERAS, tunnels)):
+            proc = tun.get('proc')
+            url  = tun.get('url')
+            # Tunnel caiu se o processo terminou ou a URL foi zerada
+            if proc and proc.poll() is not None:
+                print(f'\n⚠️  Tunnel {cam["name"]} caiu (exit {proc.returncode}). Reiniciando...')
+                tun['url'] = None
+                tun['proc'] = None
+                t = threading.Thread(target=start_tunnel, args=(cloudflared, cam, tun), daemon=True)
+                t.start()
+                # Aguarda nova URL (máx 60s)
+                deadline = time.time() + 60
+                while time.time() < deadline and not tun.get('url'):
+                    time.sleep(1)
+                if tun.get('url'):
+                    print(f'  ✓ Tunnel reiniciado: {tun["url"]}')
+                    # Atualiza active list
+                    for j, (ac, au) in enumerate(active):
+                        if ac is cam:
+                            active[j] = (cam, tun['url'])
+                            break
+                    # Recadastra no DVR com nova URL
+                    s = login_dvr()
+                    if s:
+                        register_tunnel_camera(s, cam, tun['url'])
+                else:
+                    print(f'  ✗ Tunnel {cam["name"]} não recuperou URL.')
+
+        # ── Keep-alive: faz ping nos tunnels p/ não ficarem ociosos ────
+        if now - last_keepalive >= KEEPALIVE_INTERVAL:
+            last_keepalive = now
+            try:
+                keepalive_tunnels(active)
+            except Exception as e:
+                print(f'  ⚠️  Keep-alive: {e}')
+
+        # ── Health-check periódico ──────────────────────────────────────
         if now - last_monitor >= MONITOR_INTERVAL:
             last_monitor = now
-            s = login_dvr()
-            if s:
-                print('\n🔎 Health-check do DVR...')
-                ensure_cameras_healthy(s, active)
-        time.sleep(10)
+            try:
+                s = login_dvr()
+                if s:
+                    print('\n🔎 Health-check do DVR...')
+                    ensure_cameras_healthy(s, active)
+            except Exception as e:
+                print(f'\n⚠️  Health-check falhou: {e}')
+
+        time.sleep(5)
 except KeyboardInterrupt:
     print('\n\nEncerrando tunnels...')
     for t in tunnels:

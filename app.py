@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Modo remoto somente visualizacao (ex.: deploy no DA)
+REMOTE_VIEW_ONLY = os.environ.get('DVR_REMOTE_VIEW_ONLY', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
 # User-Agent customizado para evitar bloqueio do ModSecurity/WAF
 HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (DVR-Camera-Viewer/1.0)'}
 
@@ -206,6 +209,12 @@ def login_required(f):
             return redirect(url_for('login_page', next=request.path))
         return f(*args, **kwargs)
     return decorated
+
+
+def deny_if_remote_view_only():
+    if REMOTE_VIEW_ONLY:
+        return jsonify({'success': False, 'error': 'Modo remoto: alteracoes desabilitadas'}), 403
+    return None
 
 # ---------- Rotas de autenticação ----------
 
@@ -644,7 +653,7 @@ def index():
     config = load_config()
     cameras = config.get('cameras', {})
     
-    if not cameras:
+    if not cameras and not REMOTE_VIEW_ONLY:
         return redirect(url_for('config_page'))  # redireciona para /cameras
     
     camera_boxes = ""
@@ -662,7 +671,7 @@ def index():
             </div>
             """
     
-    if not camera_boxes:
+    if not camera_boxes and not REMOTE_VIEW_ONLY:
         camera_boxes = '''
         <div style="grid-column: 1/-1; padding: 30px; text-align: center; color: #fff; background: rgba(255,152,0,0.15); border: 2px solid #ff9800; border-radius: 12px; margin: 20px 0;">
             <h2>⚠️ Nenhuma câmera detectada</h2>
@@ -680,13 +689,23 @@ def index():
             <p style="font-size: 0.85em; opacity: 0.7; margin-top: 15px;">Ou configure câmeras manualmente em <a href="/cameras" style="color: #4CAF50;">⚙️ Configurar</a></p>
         </div>
         '''
+    elif not camera_boxes and REMOTE_VIEW_ONLY:
+        camera_boxes = '''
+        <div style="grid-column: 1/-1; padding: 30px; text-align: center; color: #fff; background: rgba(255,152,0,0.15); border: 2px solid #ff9800; border-radius: 12px; margin: 20px 0;">
+            <h2>⚠️ Nenhuma câmera disponível</h2>
+            <p style="margin: 15px 0;">Este DVR está em modo remoto somente visualização.</p>
+            <p style="font-size: 0.9em; opacity: 0.85;">Faça cadastro e busca no DVR Local.</p>
+        </div>
+        '''
     
-    return render_template_string(INDEX_TEMPLATE, camera_boxes=camera_boxes)
+    return render_template_string(INDEX_TEMPLATE, camera_boxes=camera_boxes, remote_view_only=REMOTE_VIEW_ONLY)
 
 @app.route('/cameras')
 @login_required
 def config_page():
     """Página de configuração"""
+    if REMOTE_VIEW_ONLY:
+        return redirect(url_for('index'))
     config = load_config()
     cameras = config.get('cameras', {})
     storage = get_storage_settings(config)
@@ -700,6 +719,9 @@ def config_page():
 @login_required
 def add_camera():
     """Adiciona nova câmera"""
+    denied = deny_if_remote_view_only()
+    if denied:
+        return denied
     data = request.form
     
     config = load_config()
@@ -746,6 +768,9 @@ def add_camera():
 @login_required
 def edit_camera(cam_id):
     """Edita câmera existente"""
+    denied = deny_if_remote_view_only()
+    if denied:
+        return denied
     data = request.form
     config = load_config()
     
@@ -805,6 +830,9 @@ def get_camera(cam_id):
 @login_required
 def delete_camera(cam_id):
     """Remove câmera"""
+    denied = deny_if_remote_view_only()
+    if denied:
+        return denied
     config = load_config()
     
     if cam_id in config['cameras']:
@@ -820,6 +848,9 @@ def delete_camera(cam_id):
 @login_required
 def toggle_camera(cam_id):
     """Ativa/desativa câmera"""
+    denied = deny_if_remote_view_only()
+    if denied:
+        return denied
     config = load_config()
     
     if cam_id in config['cameras']:
@@ -847,12 +878,17 @@ def camera_stream(cam_id):
 @login_required
 def scan_page():
     """Página de scanner de rede"""
+    if REMOTE_VIEW_ONLY:
+        return redirect(url_for('index'))
     return render_template_string(SCAN_TEMPLATE)
 
 @app.route('/api/scan', methods=['POST'])
 @login_required
 def scan_network():
     """Scanner de rede para encontrar câmeras (dois estágios: TCP rápido + HTTP nas respostas)"""
+    denied = deny_if_remote_view_only()
+    if denied:
+        return denied
     # Detectar subnet local de forma confiável
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1393,7 +1429,17 @@ def recordings_page():
     config = load_config()
     tunnel_url = config.get('recordings_tunnel_url', '').strip()
     if tunnel_url:
-        return redirect(tunnel_url)
+        # Verifica se o tunnel ainda está acessível antes de redirecionar
+        try:
+            probe = requests.head(tunnel_url, timeout=4, allow_redirects=True)
+            if probe.status_code < 500:
+                return redirect(tunnel_url)
+        except Exception:
+            pass
+        # Tunnel morto — limpa do config e serve localmente
+        config.pop('recordings_tunnel_url', None)
+        save_config(config)
+        logger.warning('recordings_tunnel_url inacessível, removido do config.')
     cameras = config.get('cameras', {})
     files_by_cam = {}
     for cam_id, cam_info in cameras.items():
@@ -1814,8 +1860,10 @@ INDEX_TEMPLATE = """
         <h1>🎥 DVR Local</h1>
         <div class="header-buttons">
             <button id="btn-motion-all" class="btn btn-record" onclick="toggleMotionAll()">⏺️ Gravar todas</button>
+            {% if not remote_view_only %}
             <a href="/cameras" class="btn btn-config">⚙️ Configurar</a>
             <a href="/scan" class="btn btn-scan">🔍 Buscar</a>
+            {% endif %}
             <a href="/recordings" class="btn" style="background:#e67e22;">🎞️ Gravações</a>
             <a href="/logout" class="btn" style="background:#e74c3c;">🚪 Sair</a>
         </div>

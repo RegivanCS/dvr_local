@@ -1,3 +1,35 @@
 {
-  "cameras": {}
+  "cameras": {
+    "1777232101214": {
+      "name": "Câmera 1 (192.168.1.5)",
+      "ip": "omaha-korea-oral-burner.trycloudflare.com",
+      "port": "443",
+      "user": "admin",
+      "password": "",
+      "model": "generic",
+      "path": "/snapshot.jpg",
+      "snapshot_url": "https://omaha-korea-oral-burner.trycloudflare.com:443/snapshot.jpg",
+      "stream_url": "",
+      "enabled": true,
+      "created_at": "2026-04-26T16:35:01.214599"
+    },
+    "1777232101221": {
+      "name": "Câmera 2 (192.168.1.6)",
+      "ip": "incurred-oasis-slowly-reply.trycloudflare.com",
+      "port": "443",
+      "user": "admin",
+      "password": "",
+      "model": "generic",
+      "path": "/snapshot.jpg",
+      "snapshot_url": "https://incurred-oasis-slowly-reply.trycloudflare.com:443/snapshot.jpg",
+      "stream_url": "",
+      "enabled": true,
+      "created_at": "2026-04-26T16:35:01.221444"
+    }
+  },
+  "auth": {
+    "user": "admin",
+    "password": "!Rede!123"
+  },
+  "recordings_tunnel_url": "https://specifies-hourly-concerns-voters.trycloudflare.com"
 }

@@ -328,11 +328,26 @@ def _launch_webview():
 
 
 # ── entrypoint ─────────────────────────────────────────────────────────────────
+def _get_local_ip() -> str:
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+
 def main():
+    local_ip = _get_local_ip()
     print("=" * 50)
     print("  DVR Local - iniciando...")
     print(f"  Pasta base: {BASE_DIR}")
     print(f"  Python:     {_python_exe()}")
+    print(f"  Acesso local:      http://127.0.0.1:{APP_PORT}")
+    print(f"  Acesso rede local: http://{local_ip}:{APP_PORT}")
     print("=" * 50)
 
     # Inicia todos os serviços em background

@@ -53,6 +53,7 @@ CAMERAS = [
 
 # Pasta de gravações (relativa ao diretório deste script)
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'recordings')
+SNAPSHOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'snapshots')
 
 # Sensibilidade: pixels em movimento para disparar (menor = mais sensível)
 MOTION_THRESHOLD = 3000
@@ -66,6 +67,11 @@ FRAME_HEIGHT = None
 
 # FPS do vídeo gravado
 RECORD_FPS = 10
+
+# Detecção humana (snapshot local)
+HUMAN_DETECT_ENABLED = True
+HUMAN_DETECT_INTERVAL = 2.0
+HUMAN_SNAPSHOT_COOLDOWN = 20
 # ─────────────────────────────────────────────
 
 
@@ -78,11 +84,30 @@ def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
+def detect_person_hog(hog, frame):
+    # Reduz a imagem para acelerar inferencia sem perder contexto
+    h, w = frame.shape[:2]
+    scale = 1.0
+    if w > 960:
+        scale = 960.0 / float(w)
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+
+    rects, _weights = hog.detectMultiScale(
+        frame,
+        winStride=(8, 8),
+        padding=(8, 8),
+        scale=1.05,
+    )
+    return len(rects) > 0
+
+
 def camera_worker(cam: dict):
     """Thread de detecção e gravação para uma câmera."""
     rtsp_url = build_rtsp_url(cam)
     cam_dir  = os.path.join(RECORDINGS_DIR, cam['id'])
+    snap_dir = os.path.join(SNAPSHOTS_DIR, cam['id'])
     ensure_dir(cam_dir)
+    ensure_dir(snap_dir)
 
     print(f"[{cam['name']}] Conectando: rtsp://{cam['ip']}:{cam['port']}{cam['path']}")
 
@@ -101,9 +126,13 @@ def camera_worker(cam: dict):
         print(f"[{cam['name']}] ✓ Conectado. Monitorando...")
 
         subtractor   = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
+        hog = cv2.HOGDescriptor()
+        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
         writer       = None
         last_motion  = 0
         motion_count = 0
+        last_human_check = 0
+        last_human_snapshot = 0
         video_path   = None
 
         try:
@@ -125,6 +154,20 @@ def camera_worker(cam: dict):
                     motion_count += 1
                     ts = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                     print(f"[{cam['name']}] 🎯 Movimento #{motion_count} — {pixels}px — {ts}")
+
+                # Captura imagem quando detectar pessoa durante movimento
+                if HUMAN_DETECT_ENABLED and last_motion and (now - last_human_check) >= HUMAN_DETECT_INTERVAL:
+                    last_human_check = now
+                    try:
+                        if detect_person_hog(hog, frame):
+                            if now - last_human_snapshot >= HUMAN_SNAPSHOT_COOLDOWN:
+                                ts_img = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                img_path = os.path.join(snap_dir, f'human_{ts_img}.jpg')
+                                cv2.imwrite(img_path, frame)
+                                last_human_snapshot = now
+                                print(f"[{cam['name']}] 🧍 Pessoa detectada — snapshot: {img_path}")
+                    except Exception as e:
+                        print(f"[{cam['name']}] Aviso detecção humana: {e}")
 
                 # Gerenciar gravação
                 if last_motion and now - last_motion < RECORD_COOLDOWN:
@@ -193,6 +236,7 @@ print('Pressione Ctrl+C para parar.')
 print('=' * 60)
 
 ensure_dir(RECORDINGS_DIR)
+ensure_dir(SNAPSHOTS_DIR)
 
 threads = []
 for cam in CAMERAS:

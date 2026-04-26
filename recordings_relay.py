@@ -28,7 +28,9 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(errors='replace')
 
 # ─────────────────────────────────────────────
-DVR_URL      = 'https://dvr.regivan.tec.br'
+DVR_URL_LOCAL  = 'http://127.0.0.1:8000'
+DVR_URL_REMOTE = 'https://dvr.regivan.tec.br'
+DVR_URL        = DVR_URL_LOCAL   # padrão: local
 DVR_USER     = 'admin'
 DVR_PASSWORD = '!Rede!123'
 PORT         = 8290
@@ -436,36 +438,38 @@ def find_cloudflared():
 def register_recordings_url_powershell(tunnel_url):
     """Usa PowerShell para registrar a URL no DVR (Python 3.14 tem bug TLS).
     O endpoint /api/set-recordings-url autentica via token sha256('dvr-clear:{password}').
+    Tenta local primeiro, depois remoto.
     """
     import hashlib
     token = hashlib.sha256(f'dvr-clear:{DVR_PASSWORD}'.encode()).hexdigest()
-    script = f"""
+    for dvr_url in [DVR_URL_LOCAL, DVR_URL_REMOTE]:
+        script = f"""
 $ErrorActionPreference = 'Stop'
 $body = "token={token}&url={tunnel_url}"
-$reg = Invoke-WebRequest -Uri '{DVR_URL}/api/set-recordings-url' `
+$reg = Invoke-WebRequest -Uri '{dvr_url}/api/set-recordings-url' `
     -Method POST -Body $body -ContentType 'application/x-www-form-urlencoded' `
     -UseBasicParsing -ErrorAction Stop
 Write-Output "RESULT:$($reg.Content)"
 """
-    try:
-        result = subprocess.run(
-            ['powershell', '-NoProfile', '-Command', script],
-            capture_output=True, text=True, timeout=30,
-        )
-        out = (result.stdout + result.stderr).strip()
-        if 'RESULT:' in out:
-            content = out.split('RESULT:', 1)[1].strip()
-            if '"success": true' in content or '"success":true' in content:
-                print(f'✓ URL de gravações registrada no DVR: {tunnel_url}')
-                return True
+        try:
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-Command', script],
+                capture_output=True, text=True, timeout=30,
+            )
+            out = (result.stdout + result.stderr).strip()
+            if 'RESULT:' in out:
+                content = out.split('RESULT:', 1)[1].strip()
+                if '"success": true' in content or '"success":true' in content:
+                    print(f'✓ URL de gravações registrada no DVR ({dvr_url}): {tunnel_url}')
+                    return True
+                else:
+                    print(f'✗ Resposta do DVR ({dvr_url}): {content[:200]}')
             else:
-                print(f'✗ Resposta do DVR: {content[:200]}')
-        else:
-            print(f'✗ PowerShell: {out[:300]}')
-    except subprocess.TimeoutExpired:
-        print('✗ Timeout ao registrar no DVR')
-    except Exception as e:
-        print(f'✗ Erro ao registrar: {e}')
+                print(f'✗ PowerShell ({dvr_url}): {out[:300]}')
+        except subprocess.TimeoutExpired:
+            print(f'✗ Timeout ao registrar em {dvr_url}')
+        except Exception as e:
+            print(f'✗ Erro ao registrar em {dvr_url}: {e}')
     return False
 
 
