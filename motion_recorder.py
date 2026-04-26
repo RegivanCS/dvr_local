@@ -17,6 +17,7 @@ import shutil
 import glob
 from datetime import datetime
 from urllib.parse import quote
+import numpy as np
 
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -112,115 +113,129 @@ def camera_worker(cam: dict):
     print(f"[{cam['name']}] Conectando: rtsp://{cam['ip']}:{cam['port']}{cam['path']}")
 
     while True:
-        cap = cv2.VideoCapture(rtsp_url)
-        if not cap.isOpened():
-            print(f"[{cam['name']}] ✗ Falha na conexão. Retry em 5s...")
-            time.sleep(5)
-            continue
-
-        if FRAME_WIDTH:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        if FRAME_HEIGHT:
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-
-        print(f"[{cam['name']}] ✓ Conectado. Monitorando...")
-
-        subtractor   = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
-        hog = cv2.HOGDescriptor()
-        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-        writer       = None
-        last_motion  = 0
-        motion_count = 0
-        last_human_check = 0
-        last_human_snapshot = 0
-        video_path   = None
-
+        proc = None
         try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    print(f"[{cam['name']}] Sem frame — reconectando...")
-                    break
+            # Usa ffmpeg para capturar frames (mais confiável que OpenCV direto)
+            if FFMPEG:
+                proc = subprocess.Popen(
+                    [
+                        FFMPEG,
+                        '-rtsp_transport', 'tcp',
+                        '-i', rtsp_url,
+                        '-vf', f'fps={RECORD_FPS}',
+                        '-f', 'image2pipe',
+                        '-vcodec', 'mjpeg',
+                        '-q:v', '5',
+                        '-loglevel', 'error',
+                        'pipe:1',
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
 
-                # Detectar movimento
-                small   = cv2.resize(frame, (320, 240))
-                fgmask  = subtractor.apply(small)
-                _, mask = cv2.threshold(fgmask, 128, 255, cv2.THRESH_BINARY)
-                pixels  = cv2.countNonZero(mask)
+                print(f"[{cam['name']}] ✓ Conectado via ffmpeg. Monitorando...")
 
-                now = time.time()
-                if pixels > MOTION_THRESHOLD:
-                    last_motion = now
-                    motion_count += 1
-                    ts = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-                    print(f"[{cam['name']}] 🎯 Movimento #{motion_count} — {pixels}px — {ts}")
+                subtractor   = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
+                hog = cv2.HOGDescriptor()
+                hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+                writer       = None
+                last_motion  = 0
+                motion_count = 0
+                last_human_check = 0
+                last_human_snapshot = 0
+                video_path   = None
+                buf = b''
 
-                # Captura imagem quando detectar pessoa durante movimento
-                if HUMAN_DETECT_ENABLED and last_motion and (now - last_human_check) >= HUMAN_DETECT_INTERVAL:
-                    last_human_check = now
-                    try:
-                        if detect_person_hog(hog, frame):
-                            if now - last_human_snapshot >= HUMAN_SNAPSHOT_COOLDOWN:
-                                ts_img = datetime.now().strftime('%Y%m%d_%H%M%S')
-                                img_path = os.path.join(snap_dir, f'human_{ts_img}.jpg')
-                                cv2.imwrite(img_path, frame)
-                                last_human_snapshot = now
-                                print(f"[{cam['name']}] 🧍 Pessoa detectada — snapshot: {img_path}")
-                    except Exception as e:
-                        print(f"[{cam['name']}] Aviso detecção humana: {e}")
+                while True:
+                    # Lê dados do ffmpeg
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        print(f"[{cam['name']}] Sem dados do ffmpeg — reconectando...")
+                        break
 
-                # Gerenciar gravação
-                if last_motion and now - last_motion < RECORD_COOLDOWN:
-                    if writer is None:
-                        ts_str     = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        video_path = os.path.join(cam_dir, f'motion_{ts_str}.mp4')
-                        h, w       = frame.shape[:2]
-                        if FFMPEG:
-                            # Grava H.264 via ffmpeg (compatível com browsers)
-                            writer = subprocess.Popen(
-                                [
-                                    FFMPEG, '-y',
-                                    '-f', 'rawvideo', '-vcodec', 'rawvideo',
-                                    '-s', f'{w}x{h}', '-pix_fmt', 'bgr24',
-                                    '-r', str(RECORD_FPS), '-i', 'pipe:0',
-                                    '-vcodec', 'libx264', '-preset', 'fast',
-                                    '-crf', '23', '-pix_fmt', 'yuv420p',
-                                    '-movflags', '+faststart',
-                                    video_path,
-                                ],
-                                stdin=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL,
-                            )
+                    buf += chunk
+
+                    # Processa frames JPEG do stream
+                    while True:
+                        start = buf.find(b'\xff\xd8')
+                        if start == -1:
+                            buf = b''
+                            break
+                        end = buf.find(b'\xff\xd9', start + 2)
+                        if end == -1:
+                            buf = buf[start:]
+                            break
+
+                        # Decodifica frame JPEG
+                        frame_data = buf[start:end + 2]
+                        buf = buf[end + 2:]
+
+                        # Converte para numpy array
+                        frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
+                        if frame is None:
+                            continue
+
+                        now = time.time()
+
+                        # Detectar movimento
+                        small   = cv2.resize(frame, (320, 240))
+                        fgmask  = subtractor.apply(small)
+                        _, mask = cv2.threshold(fgmask, 128, 255, cv2.THRESH_BINARY)
+                        pixels  = cv2.countNonZero(mask)
+
+                        if pixels > MOTION_THRESHOLD:
+                            last_motion = now
+                            motion_count += 1
+                            ts = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+                            print(f"[{cam['name']}] 🎯 Movimento #{motion_count} — {pixels}px — {ts}")
+
+                        # Captura imagem quando detectar pessoa durante movimento
+                        if HUMAN_DETECT_ENABLED and last_motion and (now - last_human_check) >= HUMAN_DETECT_INTERVAL:
+                            last_human_check = now
+                            try:
+                                if detect_person_hog(hog, frame):
+                                    if now - last_human_snapshot >= HUMAN_SNAPSHOT_COOLDOWN:
+                                        ts_img = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                        img_path = os.path.join(snap_dir, f'human_{ts_img}.jpg')
+                                        cv2.imwrite(img_path, frame)
+                                        last_human_snapshot = now
+                                        print(f"[{cam['name']}] 🧍 Pessoa detectada — snapshot: {img_path}")
+                            except Exception as e:
+                                print(f"[{cam['name']}] Aviso detecção humana: {e}")
+
+                        # Gerenciar gravação
+                        if last_motion and now - last_motion < RECORD_COOLDOWN:
+                            if writer is None:
+                                ts_str     = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                video_path = os.path.join(cam_dir, f'motion_{ts_str}.mp4')
+                                h, w       = frame.shape[:2]
+                                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                writer = cv2.VideoWriter(video_path, fourcc, RECORD_FPS, (w, h))
+                                print(f"[{cam['name']}] 📹 Gravando: {video_path}")
+                            # Escreve frame
+                            if writer:
+                                writer.write(frame)
                         else:
-                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                            writer = cv2.VideoWriter(video_path, fourcc, RECORD_FPS, (w, h))
-                        print(f"[{cam['name']}] 📹 Gravando: {video_path}")
-                    # Escreve frame
-                    if FFMPEG and hasattr(writer, 'stdin') and writer.stdin:
-                        writer.stdin.write(frame.tobytes())
-                    elif hasattr(writer, 'write'):
-                        writer.write(frame)
-                else:
-                    if writer is not None:
-                        if FFMPEG and hasattr(writer, 'stdin') and writer.stdin:
-                            writer.stdin.close()
-                            writer.wait()
-                        elif hasattr(writer, 'release'):
-                            writer.release()
-                        writer = None
-                        print(f"[{cam['name']}] 💾 Gravação salva: {video_path}")
-                        video_path = None
+                            if writer is not None:
+                                writer.release()
+                                writer = None
+                                print(f"[{cam['name']}] 💾 Gravação salva: {video_path}")
+                                video_path = None
+            else:
+                print(f"[{cam['name']}] ✗ FFMPEG não encontrado. Abortando.")
+                break
 
         except Exception as e:
             print(f"[{cam['name']}] Erro: {e}")
         finally:
+            if proc:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
             if writer is not None:
-                if FFMPEG and hasattr(writer, 'stdin') and writer.stdin:
-                    writer.stdin.close()
-                    writer.wait()
-                elif hasattr(writer, 'release'):
-                    writer.release()
-            cap.release()
+                writer.release()
             time.sleep(3)
 
 

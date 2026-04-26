@@ -1,35 +1,35 @@
 {
   "cameras": {
-    "1777239455850": {
+    "1777244446711": {
       "name": "Câmera 1 (192.168.1.5)",
-      "ip": "weeks-somewhat-transcript-animated.trycloudflare.com",
+      "ip": "luck-offerings-paragraphs-skating.trycloudflare.com",
       "port": "443",
       "user": "admin",
       "password": "",
       "model": "generic",
       "path": "/snapshot.jpg",
-      "enabled": true,
-      "snapshot_url": "https://weeks-somewhat-transcript-animated.trycloudflare.com:443/snapshot.jpg",
+      "snapshot_url": "https://luck-offerings-paragraphs-skating.trycloudflare.com:443/snapshot.jpg",
       "stream_url": "",
-      "updated_at": "2026-04-26T18:39:54.438390"
+      "enabled": true,
+      "created_at": "2026-04-26T20:00:46.711455"
     },
-    "1777239455851": {
+    "1777244447159": {
       "name": "Câmera 2 (192.168.1.6)",
-      "ip": "structured-madonna-hearing-input.trycloudflare.com",
+      "ip": "briefly-mount-registration-log.trycloudflare.com",
       "port": "443",
       "user": "admin",
       "password": "",
       "model": "generic",
       "path": "/snapshot.jpg",
-      "enabled": true,
-      "snapshot_url": "https://structured-madonna-hearing-input.trycloudflare.com:443/snapshot.jpg",
+      "snapshot_url": "https://briefly-mount-registration-log.trycloudflare.com:443/snapshot.jpg",
       "stream_url": "",
-      "updated_at": "2026-04-26T18:39:54.463938"
+      "enabled": true,
+      "created_at": "2026-04-26T20:00:47.159550"
     }
   },
   "auth": {
     "user": "admin",
     "password": "!Rede!123"
   },
-  "recordings_tunnel_url": "https://salvation-player-freight-value.trycloudflare.com"
+  "recordings_tunnel_url": "https://savings-shirts-flood-dice.trycloudflare.com"
 }
